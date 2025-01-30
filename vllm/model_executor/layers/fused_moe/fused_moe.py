@@ -3,7 +3,7 @@ import functools
 import json
 import os
 from typing import Any, Callable, Dict, Optional, Tuple
-
+import triton.profiler as proton
 import torch
 import triton
 import triton.language as tl
@@ -255,37 +255,37 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
-
-    fused_moe_kernel[grid](
-        A,
-        B,
-        C,
-        A_scale,
-        B_scale,
-        topk_weights,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        B.shape[1],
-        B.shape[2],
-        sorted_token_ids.shape[0],
-        topk_ids.numel(),
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(2),
-        B.stride(1),
-        C.stride(1),
-        C.stride(2),
-        B_scale.stride(0) if B_scale is not None and use_int8_w8a16 else 0,
-        B_scale.stride(1) if B_scale is not None and use_int8_w8a16 else 0,
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
-        top_k=top_k,
-        compute_type=compute_type,
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
-        **config,
-    )
+    with proton.scope("fused_moe_kernel"):
+        fused_moe_kernel[grid](
+            A,
+            B,
+            C,
+            A_scale,
+            B_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            B.shape[1],
+            B.shape[2],
+            sorted_token_ids.shape[0],
+            topk_ids.numel(),
+            A.stride(0),
+            A.stride(1),
+            B.stride(0),
+            B.stride(2),
+            B.stride(1),
+            C.stride(1),
+            C.stride(2),
+            B_scale.stride(0) if B_scale is not None and use_int8_w8a16 else 0,
+            B_scale.stride(1) if B_scale is not None and use_int8_w8a16 else 0,
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            **config,
+        )
 
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:

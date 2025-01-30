@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+import triton.profiler as proton
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -913,21 +914,22 @@ def unified_flash_attention(
         if decode_meta.max_decode_query_len > 1:
             assert attn_type == AttentionType.DECODER, (
                 "Only decoder-only models support max_decode_query_len > 1")
-            decode_output = flash_attn_varlen_func(
-                q=decode_query,
-                k=key_cache,
-                v=value_cache,
-                cu_seqlens_q=decode_meta.query_start_loc,
-                max_seqlen_q=decode_meta.max_decode_query_len,
-                cu_seqlens_k=decode_meta.seq_start_loc,
-                max_seqlen_k=decode_meta.max_decode_seq_len,
-                softmax_scale=softmax_scale,
-                causal=True,
-                window_size=window_size,
-                alibi_slopes=alibi_slopes,
-                softcap=logits_soft_cap,
-                block_table=decode_meta.block_tables,
-            )
+            with proton.scope("flash_attn_varlen_func"):
+                decode_output = flash_attn_varlen_func(
+                    q=decode_query,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=decode_meta.query_start_loc,
+                    max_seqlen_q=decode_meta.max_decode_query_len,
+                    cu_seqlens_k=decode_meta.seq_start_loc,
+                    max_seqlen_k=decode_meta.max_decode_seq_len,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    window_size=window_size,
+                    alibi_slopes=alibi_slopes,
+                    softcap=logits_soft_cap,
+                    block_table=decode_meta.block_tables,
+                )
         else:
             # Use flash_attn_with_kvcache for normal decoding.
             (
@@ -935,18 +937,19 @@ def unified_flash_attention(
                 _,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-            decode_output = flash_attn_with_kvcache(
-                q=decode_query.unsqueeze(1),
-                k_cache=key_cache,
-                v_cache=value_cache,
-                block_table=block_tables_arg,
-                cache_seqlens=seq_lens_arg,
-                softmax_scale=softmax_scale,
-                causal=True,
-                window_size=window_size,
-                alibi_slopes=alibi_slopes,
-                softcap=logits_soft_cap,
-            ).squeeze(1)
+            with proton.scope("flash_attn_with_kvcache"):
+                decode_output = flash_attn_with_kvcache(
+                    q=decode_query.unsqueeze(1),
+                    k_cache=key_cache,
+                    v_cache=value_cache,
+                    block_table=block_tables_arg,
+                    cache_seqlens=seq_lens_arg,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    window_size=window_size,
+                    alibi_slopes=alibi_slopes,
+                    softcap=logits_soft_cap,
+                ).squeeze(1)
 
     if prefill_output is None:
         assert decode_output is not None

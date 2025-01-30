@@ -469,8 +469,10 @@ def get_requirements() -> List[str]:
         modified_requirements = []
         for req in requirements:
             if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
+                    # and not (cuda_major == "12" and cuda_minor == "1")):
+                    and cuda_major != '12'):
+                # before: vllm-flash-attn is built only for CUDA 12.1.
+                # enable vllm-flash-attn for CUDA 12.x
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)

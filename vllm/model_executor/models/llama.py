@@ -21,7 +21,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
-
+import triton.profiler as proton
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -90,9 +90,12 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
-        x, _ = self.down_proj(x)
+        with proton.scope("LlamaMLP gate-up proj"):
+            x, _ = self.gate_up_proj(x)
+        with proton.scope("LlamaMLP activation fn"):
+            x = self.act_fn(x)
+        with proton.scope("LlamaMLP down proj"):
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -183,11 +186,16 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output)
+        with proton.scope("LlamaAttention forward: qkv_proj"):
+            qkv, _ = self.qkv_proj(hidden_states)
+        with proton.scope("LlamaAttention forward: qkv split"):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        with proton.scope("LlamaAttention forward: rotary_emb"):
+            q, k = self.rotary_emb(positions, q, k)
+        with proton.scope("LlamaAttention forward: attn"):
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        with proton.scope("LlamaAttention forward: output_proj"):
+            output, _ = self.o_proj(attn_output)
         return output
 
 
