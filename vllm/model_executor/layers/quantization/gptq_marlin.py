@@ -1,7 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
-
+import triton.profiler as proton
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -299,7 +299,14 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer, x, bias)
+        with proton.scope("GPTQ-Marlin Linear Method", metrics={
+            "bytes(exc)": (
+                x.numel() * x.element_size() +
+                layer.qweight.numel() * layer.qweight.element_size() +
+                (bias.numel() * bias.element_size() if bias is not None else 0)
+            )
+        }):
+            return self.kernel.apply_weights(layer, x, bias)
 
 
 class GPTQMarlinMoEMethod(FusedMoEMethodBase):
@@ -538,28 +545,61 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         orig_dtype = x.dtype
         x = x.half()
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=None)
+        with proton.scope("FusedMoE select_experts", metrics={
+        "bytes(exc)": (
+            # Input tensors
+            x.numel() * x.element_size() +
+            router_logits.numel() * router_logits.element_size()
+        )}):
 
-        return torch.ops.vllm.fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            layer.w13_scales,
-            layer.w2_scales,
-            router_logits,
-            topk_weights,
-            topk_ids,
-            g_idx1=layer.w13_g_idx,
-            g_idx2=layer.w2_g_idx,
-            sort_indices1=layer.w13_g_idx_sort_indices,
-            sort_indices2=layer.w2_g_idx_sort_indices,
-            num_bits=self.quant_config.quant_type.size_bits,
-        ).to(orig_dtype)
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=None)
+
+        with proton.scope("GPTQ FusedMarlinMoE forward", metrics={
+        "bytes(exc)": (
+            # Input tensors
+            x.numel() * x.element_size() +
+            # Quantized weights
+            layer.w13_qweight.numel() * layer.w13_qweight.element_size() +
+            layer.w2_qweight.numel() * layer.w2_qweight.element_size() +
+            # Scales
+            layer.w13_scales.numel() * layer.w13_scales.element_size() +
+            layer.w2_scales.numel() * layer.w2_scales.element_size() +
+            # Router tensors
+            router_logits.numel() * router_logits.element_size() +
+            topk_weights.numel() * topk_weights.element_size() +
+            topk_ids.numel() * topk_ids.element_size() +
+            # Group indices and sort indices (if they exist)
+            (layer.w13_g_idx.numel() * layer.w13_g_idx.element_size() if layer.w13_g_idx.numel() > 0 else 0) +
+            (layer.w2_g_idx.numel() * layer.w2_g_idx.element_size() if layer.w2_g_idx.numel() > 0 else 0) +
+            (layer.w13_g_idx_sort_indices.numel() * layer.w13_g_idx_sort_indices.element_size() 
+             if layer.w13_g_idx_sort_indices.numel() > 0 else 0) +
+            (layer.w2_g_idx_sort_indices.numel() * layer.w2_g_idx_sort_indices.element_size() 
+             if layer.w2_g_idx_sort_indices.numel() > 0 else 0) +
+            # Output tensor (same size as input)
+            x.numel() * x.element_size()
+        )}):
+            output = torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_qweight,
+                layer.w2_qweight,
+                layer.w13_scales,
+                layer.w2_scales,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                g_idx1=layer.w13_g_idx,
+                g_idx2=layer.w2_g_idx,
+                sort_indices1=layer.w13_g_idx_sort_indices,
+                sort_indices2=layer.w2_g_idx_sort_indices,
+                num_bits=self.quant_config.quant_type.size_bits,
+            )
+
+        return output.to(orig_dtype)

@@ -2,7 +2,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from torch.nn import Parameter
-
+import triton.profiler as proton
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -283,18 +283,26 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return apply_awq_marlin_linear(
-            input=x,
-            weight=layer.qweight,
-            weight_scale=layer.scales,
-            weight_zp=layer.qzeros,
-            g_idx=layer.g_idx,
-            g_idx_sort_indices=layer.g_idx_sort_indices,
-            workspace=layer.workspace,
-            quant_type=self.quant_config.quant_type,
-            output_size_per_partition=layer.output_size_per_partition,
-            input_size_per_partition=layer.input_size_per_partition,
-            bias=bias)
+
+        with proton.scope("AWQ-Marlin Linear Method", metrics={
+            "bytes(exc)": (
+                x.numel() * x.element_size() +
+                layer.qweight.numel() * layer.qweight.element_size() +
+                (bias.numel() * bias.element_size() if bias is not None else 0)
+            )
+        }):
+            return apply_awq_marlin_linear(
+                input=x,
+                weight=layer.qweight,
+                weight_scale=layer.scales,
+                weight_zp=layer.qzeros,
+                g_idx=layer.g_idx,
+                g_idx_sort_indices=layer.g_idx_sort_indices,
+                workspace=layer.workspace,
+                quant_type=self.quant_config.quant_type,
+                output_size_per_partition=layer.output_size_per_partition,
+                input_size_per_partition=layer.input_size_per_partition,
+                bias=bias)
 
 
 class AWQMoEMethod(FusedMoEMethodBase):
@@ -446,26 +454,54 @@ class AWQMoEMethod(FusedMoEMethodBase):
         topk_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function)
 
-        return torch.ops.vllm.fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            layer.w13_scales,
-            layer.w2_scales,
-            router_logits,
-            topk_weights,
-            topk_ids,
-            w1_zeros=layer.w13_qzeros,
-            w2_zeros=layer.w2_qzeros,
-            num_bits=self.quant_config.weight_bits,
-        )
+        with proton.scope("AWQ FusedMoE select_experts", metrics={
+        "bytes(exc)": (
+            # Input tensors
+            x.numel() * x.element_size() +
+            router_logits.numel() * router_logits.element_size()
+        )}):
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function)
+
+        with proton.scope("AWQ FusedMarlinMoE forward", metrics={
+        "bytes(exc)": (
+            # Input tensors
+            x.numel() * x.element_size() +
+            # Quantized weights
+            layer.w13_qweight.numel() * layer.w13_qweight.element_size() +
+            layer.w2_qweight.numel() * layer.w2_qweight.element_size() +
+            # Scales
+            layer.w13_scales.numel() * layer.w13_scales.element_size() +
+            layer.w2_scales.numel() * layer.w2_scales.element_size() +
+            # Router tensors
+            router_logits.numel() * router_logits.element_size() +
+            topk_weights.numel() * topk_weights.element_size() +
+            topk_ids.numel() * topk_ids.element_size() +
+            # WEIGHT_ZERO_POINT
+            layer.w13_qzeros.numel() * layer.w13_qzeros.element_size()+
+            layer.w2_qzeros.numel() * layer.w2_qzeros.element_size()+
+            # Output tensor (same size as input)
+            x.numel() * x.element_size()
+        )}):
+
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_qweight,
+                layer.w2_qweight,
+                layer.w13_scales,
+                layer.w2_scales,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                w1_zeros=layer.w13_qzeros,
+                w2_zeros=layer.w2_qzeros,
+                num_bits=self.quant_config.weight_bits,
+            )

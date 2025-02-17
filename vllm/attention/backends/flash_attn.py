@@ -914,7 +914,14 @@ def unified_flash_attention(
         if decode_meta.max_decode_query_len > 1:
             assert attn_type == AttentionType.DECODER, (
                 "Only decoder-only models support max_decode_query_len > 1")
-            with proton.scope("flash_attn_varlen_func"):
+            with proton.scope("flash_attn_varlen_func", metrics={
+                "bytes(exc)": calculate_varlen_input_bytes(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    decode_meta,
+                    alibi_slopes
+                    )}):
                 decode_output = flash_attn_varlen_func(
                     q=decode_query,
                     k=key_cache,
@@ -937,7 +944,16 @@ def unified_flash_attention(
                 _,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-            with proton.scope("flash_attn_with_kvcache"):
+            with proton.scope("flash_attn_with_kvcache", metrics={
+                "bytes(exc)": calculate_flash_attn_kvcache_bytes(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    block_tables_arg,
+                    seq_lens_arg,
+                    alibi_slopes
+                )
+                }):
                 decode_output = flash_attn_with_kvcache(
                     q=decode_query.unsqueeze(1),
                     k_cache=key_cache,
@@ -962,6 +978,102 @@ def unified_flash_attention(
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
     return output.view(num_tokens, hidden_size)
+
+
+def calculate_flash_attn_kvcache_bytes(
+    q,              # Query tensor (bs, 1, nheads, headdim)
+    k_cache,        # Key cache
+    v_cache,        # Value cache
+    block_table=None,  # Block table for paged attention
+    cache_seqlens=None,  # Sequence lengths
+    alibi_slopes=None  # Alibi slopes
+):
+    total_bytes = 0
+
+    # 1. Input tensors
+    # Query tensor read (including broadcast across sequence length)
+    total_bytes += q.numel() * q.element_size()
+
+    # 2. KV Cache access
+    if cache_seqlens is not None:
+        # Get actual sequence length for each batch
+        max_seqlen = cache_seqlens.max().item()
+        batch_size = q.size(0)
+        num_heads = q.size(1)
+        head_dim = q.size(2)
+
+        # Key cache read - only access relevant sequence positions
+        # Each query position needs to access all previous key positions
+        key_bytes = batch_size * max_seqlen * num_heads * head_dim * k_cache.element_size()
+        total_bytes += key_bytes
+
+        # Value cache read - similar pattern to key cache
+        value_bytes = batch_size * max_seqlen * num_heads * head_dim * v_cache.element_size()
+        total_bytes += value_bytes
+
+        # Output write - one output per query position
+        output_bytes = q.numel() * q.element_size()
+        total_bytes += output_bytes
+
+        # Attention scores (temporary storage, but still HBM access)
+        # Each query position produces scores for all key positions
+        attn_scores_bytes = batch_size * num_heads * max_seqlen * q.element_size()
+        total_bytes += attn_scores_bytes
+
+    # 3. Metadata access
+    if block_table is not None:
+        total_bytes += block_table.numel() * block_table.element_size()
+    if cache_seqlens is not None:
+        total_bytes += cache_seqlens.numel() * cache_seqlens.element_size()
+    if alibi_slopes is not None:
+        total_bytes += alibi_slopes.numel() * alibi_slopes.element_size()
+
+    return total_bytes
+
+def calculate_varlen_input_bytes(
+    q,              # Query tensor
+    k_cache,        # Key cache
+    v_cache,        # Value cache
+    decode_meta,    # Decode metadata
+    alibi_slopes=None  # Optional alibi slopes
+):
+    total_bytes = 0
+
+    # 1. Query tensor access
+    total_bytes += q.numel() * q.element_size()
+
+    # 2. KV Cache access for variable length
+    max_seq_len = decode_meta.max_decode_seq_len
+    batch_size = len(decode_meta.seq_lens)
+    num_heads = q.size(1)
+    head_dim = q.size(2)
+
+    # Key cache access - each query position needs all previous keys
+    key_bytes = batch_size * max_seq_len * num_heads * head_dim * k_cache.element_size()
+    total_bytes += key_bytes
+
+    # Value cache access
+    value_bytes = batch_size * max_seq_len * num_heads * head_dim * v_cache.element_size()
+    total_bytes += value_bytes
+
+    # 3. Attention computation
+    # Attention scores (temporary storage in HBM)
+    attn_scores_bytes = batch_size * num_heads * max_seq_len * q.element_size()
+    total_bytes += attn_scores_bytes
+
+    # Output tensor write
+    output_bytes = q.numel() * q.element_size()
+    total_bytes += output_bytes
+
+    # 4. Metadata
+    if decode_meta.block_tables is not None:
+        total_bytes += decode_meta.block_tables.numel() * decode_meta.block_tables.element_size()
+    total_bytes += decode_meta.query_start_loc.numel() * decode_meta.query_start_loc.element_size()
+    total_bytes += decode_meta.seq_start_loc.numel() * decode_meta.seq_start_loc.element_size()
+    if alibi_slopes is not None:
+        total_bytes += alibi_slopes.numel() * alibi_slopes.element_size()
+
+    return total_bytes
 
 
 def unified_flash_attention_fake(

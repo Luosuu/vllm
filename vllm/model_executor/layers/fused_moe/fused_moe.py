@@ -7,6 +7,9 @@ import triton.profiler as proton
 import torch
 import triton
 import triton.language as tl
+from typing import NamedTuple
+
+
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -16,37 +19,90 @@ from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+def unpack_grid(grid):
+    if len(grid) == 1:
+        return grid[0], 1, 1
+    if len(grid) == 2:
+        return grid[0], grid[1], 1
+    if len(grid) == 3:
+        return grid[0], grid[1], grid[2]
 
-@triton.jit
+def metadata_fn(
+    grid: tuple,
+    metadata: NamedTuple,
+    args: dict,
+):
+    # Unpack dimensions
+    num_tokens_post_padded = args["num_tokens_post_padded_ptr"][0]  # M dimension
+    N = args["N"]  # N dimension
+    K = args["K"]  # K dimension
+    num_valid_tokens = args["num_valid_tokens"]
+    top_k = args["top_k"]
+
+    # Get element sizes
+    a_elem_size = args["a_ptr"].element_size()
+    b_elem_size = args["b_ptr"].element_size()
+    c_elem_size = args["c_ptr"].element_size()
+
+    # Calculate actual memory traffic
+    bytes_read = (
+        # Input activations: each token reads K elements
+        num_valid_tokens * K * a_elem_size +
+        # Expert weights: each unique expert reads N*K elements
+        len(torch.unique(args["expert_ids_ptr"])) * N * K * b_elem_size +
+        # Routing information
+        args["topk_weights_ptr"].numel() * args["topk_weights_ptr"].element_size() +
+        args["sorted_token_ids_ptr"].numel() * args["sorted_token_ids_ptr"].element_size() +
+        args["expert_ids_ptr"].numel() * args["expert_ids_ptr"].element_size()
+    )
+
+    # Output writes
+    bytes_write = num_valid_tokens * N * c_elem_size
+
+    # Optional quantization scales
+    if args.get("a_scale_ptr") is not None:
+        bytes_read += args["a_scale_ptr"].numel() * args["a_scale_ptr"].element_size()
+    if args.get("b_scale_ptr") is not None and args.get("use_int8_w8a16", False):
+        bytes_read += (len(torch.unique(args["expert_ids_ptr"])) * 
+                      args["b_scale_ptr"].shape[1] * 
+                      args["b_scale_ptr"].element_size())
+
+    return {
+        "name": f"fused_moe_kernel_<tokens:{num_valid_tokens}>_<N:{N}>_<K:{K}>_<top_k:{top_k}>",
+        "flops": 2 * num_valid_tokens * N * K,  # Each token does one matrix multiply
+        "bytes": bytes_read + bytes_write,
+    }
+
+@triton.jit(launch_metadata=metadata_fn)
 def fused_moe_kernel(
         # Pointers to matrices
-        a_ptr,
-        b_ptr,
-        c_ptr,
+        a_ptr,  # Input tensor [num_tokens, dim]
+        b_ptr,  # Expert weights [num_experts, dim, expert_capacity]
+        c_ptr,  # Output tensor (num_tokens, topk, dim)
         a_scale_ptr,
         b_scale_ptr,
-        topk_weights_ptr,
-        sorted_token_ids_ptr,
-        expert_ids_ptr,
+        topk_weights_ptr,  # Routing weights [num_tokens, top_k]
+        sorted_token_ids_ptr,  # Sorted token indices
+        expert_ids_ptr, # Expert indices for each block
         num_tokens_post_padded_ptr,
         # Matrix dimensions
-        N,
-        K,
-        EM,
-        num_valid_tokens,
+        N, # Output feature dimension
+        K, # Input feature dimension
+        EM,  # Total tokens after padding
+        num_valid_tokens, # Actual number of tokens before padding
         # The stride variables represent how much to increase the ptr by when
         # moving by 1 element in a particular dimension. E.g. `stride_am` is
         # how much to increase `a_ptr` by to get the element one row down
         # (A has M rows).
-        stride_am,
-        stride_ak,
-        stride_be,
-        stride_bk,
-        stride_bn,
-        stride_cm,
-        stride_cn,
-        stride_bse,
-        stride_bsn,
+        stride_am, # Stride for moving in token dimension of input
+        stride_ak,  # Stride for moving in feature dimension of input
+        stride_be,  # Stride between experts in weight tensor
+        stride_bk,  # Stride in input feature dimension of weights
+        stride_bn,  # Stride in output feature dimension of weights
+        stride_cm,  # Stride in token dimension of output
+        stride_cn, # Stride in feature dimension of output
+        stride_bse, # used for quantization
+        stride_bsn, # used for quantization
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr,
         BLOCK_SIZE_N: tl.constexpr,
@@ -86,15 +142,25 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    # pid = tl.program_id(axis=0)
+    # num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    # num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    # num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    # group_id = pid // num_pid_in_group
+    # first_pid_m = group_id * GROUP_SIZE_M
+    # group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    # pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    # pid_n = (pid % num_pid_in_group) // group_size_m
+
+    # -----------------------------------------------------------
+    # A simpler way to get started
+    pid = tl.program_id(axis=0)  # Get unique ID for this thread
+    # num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)  # Number of blocks in M dimension
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)   # Number of blocks in N dimension
+
+    # Simple 2D grid mapping
+    pid_m = pid // num_pid_n  # Row index
+    pid_n = pid % num_pid_n   # Column index
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -255,8 +321,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
-    with proton.scope("fused_moe_kernel"):
-        fused_moe_kernel[grid](
+    with proton.scope("fused_moe_kernel call", metrics={
+        "bytes(exc)": calculate_moe_kernel_input_bytes(
             A,
             B,
             C,
@@ -265,18 +331,30 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
             topk_weights,
             sorted_token_ids,
             expert_ids,
+            use_int8_w8a16=use_int8_w8a16
+    )}):
+        # print("using fused_moe_kernel")
+        fused_moe_kernel[grid](
+            A, # Input tensor [num_tokens, dim]
+            B,  # Expert weights [num_experts, dim, expert_capacity]
+            C,  # Output tensor [num_tokens, dim]
+            A_scale,
+            B_scale,
+            topk_weights, # Routing weights [num_tokens, top_k]
+            sorted_token_ids, # Sorted token indices
+            expert_ids, # Expert indices for each block
             num_tokens_post_padded,
-            B.shape[1],
-            B.shape[2],
-            sorted_token_ids.shape[0],
-            topk_ids.numel(),
-            A.stride(0),
-            A.stride(1),
-            B.stride(0),
-            B.stride(2),
-            B.stride(1),
-            C.stride(1),
-            C.stride(2),
+            B.shape[1], # Output feature dimension
+            B.shape[2], # Input feature dimension
+            sorted_token_ids.shape[0],  # Total tokens after padding
+            topk_ids.numel(), # Actual number of tokens before padding
+            A.stride(0), # Stride for moving in token dimension of input
+            A.stride(1), # Stride for moving in feature dimension of input
+            B.stride(0), # Stride between experts in weight tensor
+            B.stride(2), # Stride in input feature dimension of weights
+            B.stride(1), # Stride in output feature dimension of weights
+            C.stride(1), # Stride in token dimension of output
+            C.stride(2), # Stride in feature dimension of output
             B_scale.stride(0) if B_scale is not None and use_int8_w8a16 else 0,
             B_scale.stride(1) if B_scale is not None and use_int8_w8a16 else 0,
             MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -559,14 +637,23 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None):
     if inplace:
-        torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
+        # torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
+        #                                      topk_weights, topk_ids,
+        #                                      use_fp8_w8a8, use_int8_w8a16,
+        #                                      w1_scale, w2_scale, a1_scale,
+        #                                      a2_scale)
+        # FINDME for replacement
+        torch.ops.vllm.inplace_fused_experts_autotune(hidden_states, w1, w2,
                                              topk_weights, topk_ids,
                                              use_fp8_w8a8, use_int8_w8a16,
                                              w1_scale, w2_scale, a1_scale,
                                              a2_scale)
         return hidden_states
     else:
-        return torch.ops.vllm.outplace_fused_experts(
+        # return torch.ops.vllm.outplace_fused_experts(
+        #     hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
+        #     use_int8_w8a16, w1_scale, w2_scale, a1_scale, a2_scale)
+        return torch.ops.vllm.outplace_fused_experts_autotune(
             hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
             use_int8_w8a16, w1_scale, w2_scale, a1_scale, a2_scale)
 
@@ -774,3 +861,420 @@ def fused_moe(
                          w2_scale=w2_scale,
                          a1_scale=a1_scale,
                          a2_scale=a2_scale)
+
+##########
+# fused MoE with auto-tunable block size 
+##########
+
+def inplace_fused_experts_autotune(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> None:
+    fused_experts_autotune_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
+                       use_fp8_w8a8, use_int8_w8a16, w1_scale, w2_scale,
+                       a1_scale, a2_scale)
+
+
+def inplace_fused_experts_autotune_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> None:
+    pass
+
+
+direct_register_custom_op(
+    op_name="inplace_fused_experts_autotune",
+    op_func=inplace_fused_experts_autotune,
+    mutates_args=["hidden_states"],
+    fake_impl=inplace_fused_experts_autotune_fake,
+)
+
+
+def outplace_fused_experts_autotune(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return fused_experts_autotune_impl(hidden_states, w1, w2, topk_weights, topk_ids,
+                              False, use_fp8_w8a8, use_int8_w8a16, w1_scale,
+                              w2_scale, a1_scale, a2_scale)
+
+
+def outplace_fused_experts_autotune_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="outplace_fused_experts_autotune",
+    op_func=outplace_fused_experts_autotune,
+    mutates_args=[],
+    fake_impl=outplace_fused_experts_autotune_fake,
+)
+
+def fused_experts_autotune_impl(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    # Check constraints
+    assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
+    assert w1.is_contiguous(), "Expert weights1 must be contiguous"
+    assert w2.is_contiguous(), "Expert weights2 must be contiguous"
+    assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
+
+    num_tokens, _ = hidden_states.shape
+    E, N, _ = w1.shape
+
+    # Allocate intermediate buffers
+    intermediate_cache1 = torch.empty((num_tokens, topk_ids.shape[1], N),
+                                    device=hidden_states.device,
+                                    dtype=hidden_states.dtype)
+    intermediate_cache2 = torch.empty((num_tokens * topk_ids.shape[1], N // 2),
+                                    device=hidden_states.device,
+                                    dtype=hidden_states.dtype)
+    intermediate_cache3 = torch.empty((num_tokens, topk_ids.shape[1], w2.shape[1]),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+
+    if inplace:
+        out_hidden_states = hidden_states
+    else:
+        out_hidden_states = torch.empty_like(hidden_states)
+
+    # First MLP + routing using autotuned dispatch
+    dispatch_autotune_moe(
+        tokens=hidden_states,
+        expert_weights=w1,
+        output=intermediate_cache1,
+        topk_ids=topk_ids,
+        expert_scores=topk_weights,
+        mul_routed_weight=False,
+        top_k=topk_ids.shape[1]
+    )
+
+    # Activation function
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+
+    # Second MLP using autotuned dispatch
+    dispatch_autotune_moe(
+        tokens=intermediate_cache2,
+        expert_weights=w2,
+        output = intermediate_cache3,
+        topk_ids=topk_ids,
+        expert_scores=topk_weights,
+        mul_routed_weight=True,
+        top_k=1
+    )
+
+    ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        out_hidden_states)
+
+    return out_hidden_states
+
+
+# used by autotune moe implementation
+def sort_tokens_by_expert(
+    tokens: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_scores: torch.Tensor
+):
+    num_tokens, top_k = topk_ids.shape
+    device = tokens.device
+
+    # Track original token indices and expert positions
+    original_indices = torch.arange(num_tokens, device=device)[:, None].repeat(1, top_k).flatten()
+    expert_pos = torch.arange(top_k, device=device).repeat(num_tokens)
+
+    # Flatten and sort
+    flat_expert_ids = topk_ids.flatten()
+    sort_order = torch.argsort(flat_expert_ids)
+
+    return (
+        tokens[original_indices[sort_order]],  # [num_tokens*top_k, hidden_dim]
+        flat_expert_ids[sort_order],            # [num_tokens*top_k]
+        expert_scores.flatten()[sort_order],     # [num_tokens*top_k]
+        original_indices[sort_order],           # [num_tokens*top_k]
+        expert_pos[sort_order]                  # [num_tokens*top_k]
+    )
+
+def dispatch_autotune_moe(
+    tokens: torch.Tensor, # [num_tokens, hidden_dim]
+    expert_weights: torch.Tensor, # [num_exp, in_dim (hidden_dim), out_dim]
+    output: torch.Tensor, # Output tensor [num_tokens, topk, dim]
+    topk_ids: torch.Tensor, # shape: [num_tokens, top_k expert ids]
+    expert_scores: torch.Tensor, # [num_tokens, top_k]
+    mul_routed_weight: bool, 
+    top_k: int,
+    # compute_type: tl.dtype,
+    # use_fp8_w8a8: bool, 
+    # use_int8_w8a16: bool
+):
+    # Sort tokens and get metadata
+    sorted_tokens, sorted_expert_ids, sorted_scores, original_indices, expert_pos = sort_tokens_by_expert(
+        tokens, topk_ids, expert_scores
+    )
+
+    num_experts = expert_weights.shape[0]
+    # Group tokens by expert
+    for expert_id in range(num_experts):
+        expert_mask = (sorted_expert_ids == expert_id)
+        tokens_this_expert = sorted_tokens[expert_mask] # TODO: this is time-consuming, we should remove it and mask the tokens in the kernel instead
+        scores_this_expert = sorted_scores[expert_mask]
+        token_indices = original_indices[expert_mask]
+        pos_indices = expert_pos[expert_mask]
+        # TODO: check whether tokens_this_expert is empty
+        if tokens_this_expert.size(0) == 0:
+            continue
+        # M, N = tokens.shape
+        # K, N = expert_weights.shape
+        # 1D launch grid
+        num_tokens = tokens_this_expert.shape[0]
+        expert_dim = expert_weights.shape[1]
+        # output_indices = torch.where(expert_mask)[0]
+        # TODO: change to lambda expression to address 
+        # https://docs.astral.sh/ruff/rules/function-uses-loop-variable/
+        def grid(meta):
+            return (triton.cdiv(tokens_this_expert.shape[0], meta["BLOCK_SIZE_M"]) *
+            triton.cdiv(expert_weights.shape[1], meta["BLOCK_SIZE_N"]),)
+
+        # Create temporary output buffer
+        output_this_expert = torch.zeros(
+            tokens_this_expert.size(0), expert_weights.size(1),
+            dtype=output.dtype, device=output.device
+        )
+        autotune_moe_kernel[grid](
+            tokens_ptr=sorted_tokens,  # give ptr to entire input tokens
+            # tokens_start= , # speficy the location of tokens for this expert
+            # tokend_end= ,
+            expert_weight_ptr=expert_weights[expert_id], 
+            # expert_id = expert_id,
+            scores_ptr=scores_this_expert,
+            output_ptr=output_this_expert,
+            # sorted_expert_ids_ptr=sorted_expert_ids, # maybe useless
+            # scores_ptr=sorted_scores, 
+            num_tokens=num_tokens, 
+            expert_dim=expert_dim, 
+            hidden_dim=tokens.shape[1],
+            num_experts=num_experts, # maybe useless
+            stride_token=tokens.stride(0), 
+            stride_input_feature_dim =tokens.stride(1),
+            stride_experts=expert_weights.stride(0), # maybe useless
+            stride_in_dim_weight=expert_weights.stride(2),
+            stride_out_dim_weight=expert_weights.stride(1),
+            stride_output_token=output.stride(1),
+            stride_output_feature_dim=output.stride(2),
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+        )
+        # Scatter back to 3D output using both indices
+        output[token_indices, pos_indices] += output_this_expert
+
+    return output
+
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 32}),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
+    ],
+    key=['num_tokens', 'hidden_dim', 'expert_dim'],
+)
+@triton.jit
+def autotune_moe_kernel(
+        tokens_ptr, # Input tensor [num_tokens, dim]
+        expert_weight_ptr,  # Expert weight [dim, expert_capacity]
+        # expert_id, # 
+        scores_ptr, # scores for this expert
+        output_ptr, # Output tensor [num_tokens, dim]
+        # a_scale_ptr, # used for quantization
+        # b_scale_ptr, # used for quantization
+        # sorted_expert_ids_ptr,  
+        num_tokens, 
+        expert_dim, # N, # Output feature dimension
+        hidden_dim, # K, # Input feature dimension
+        num_experts,
+        # The stride variables represent how much to increase the ptr by when
+        # moving by 1 element in a particular dimension. E.g. `stride_am` is
+        # how much to increase `a_ptr` by to get the element one row down
+        # (A (input tokens) has M rows).
+        stride_token, # Stride for moving in token dimension of input
+        stride_input_feature_dim,  # Stride for moving in feature dimension of input
+        stride_experts,  # Stride between experts in weight tensor
+        stride_in_dim_weight,  # Stride in input feature dimension of weights
+        stride_out_dim_weight,  # Stride in output feature dimension of weights
+        stride_output_token,  # Stride in token dimension of output
+        stride_output_feature_dim, # Stride in feature dimension of output
+        # stride_bse, # used for quantization
+        # stride_bsn, # used for quantization
+        # Meta-parameters
+        BLOCK_SIZE_M: tl.constexpr, 
+        BLOCK_SIZE_N: tl.constexpr, 
+        BLOCK_SIZE_K: tl.constexpr,
+        # GROUP_SIZE_M: tl.constexpr, # not useful
+        # other configs
+        MUL_ROUTED_WEIGHT: tl.constexpr,
+        top_k: tl.constexpr,
+        # compute_type: tl.constexpr, # skip quantization for now
+        # use_fp8_w8a8: tl.constexpr, # skip quantization for now
+        # use_int8_w8a16: tl.constexpr # skip quantization for now
+        ):
+    
+    # Map program ids to block coordinates
+    pid = tl.program_id(0)
+    # num_pid_m = tl.cdiv(num_tokens, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(expert_dim, BLOCK_SIZE_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+    # pid_expert = tl.program_id(1)  # determine which expert for this program
+
+    # Create block offsets
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # `token_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
+    # `expert_weight_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # boundary handling
+    token_mask = offs_m < num_tokens
+    
+    
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # blocked processing
+    for k in range(0, tl.cdiv(hidden_dim, BLOCK_SIZE_K)):
+        block_token_ptrs = (
+            tokens_ptr +
+            offs_m[:, None] * stride_token +
+            (k + offs_k[None, :]) * stride_input_feature_dim
+        ) # advance pointers for input tokens
+        tokens = tl.load(
+            block_token_ptrs,
+            mask=token_mask[:, None] & (k + offs_k[None, :] < hidden_dim),
+            other=0.0
+        )
+
+        # Load weight block
+        weight_ptrs = (
+            expert_weight_ptr +
+            (k + offs_k[:, None]) * stride_in_dim_weight +
+            offs_n[None, :] * stride_out_dim_weight
+        ) # advance pointers for weight block
+        weights = tl.load(
+            weight_ptrs,
+            mask=(k + offs_k[:, None] < hidden_dim) & (offs_n[None, :] < expert_dim),
+            other=0.0
+        )
+        # Accumulate
+        acc += tl.dot(tokens, weights, allow_tf32=True)
+
+    # Apply expert scores if needed
+    if MUL_ROUTED_WEIGHT:
+        scores = tl.load(
+            scores_ptr + offs_m,
+            mask=token_mask,
+            other=0.0
+        )
+        acc = acc * scores[:, None]
+
+    # Store output [BLOCK_SIZE_M, BLOCK_SIZE_N]
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    output_ptrs = (
+        output_ptr + 
+        offs_m[:, None] * stride_output_token + 
+        offs_n[None, :] * stride_output_feature_dim
+    )
+    output_mask = (offs_cm[:, None] < num_tokens) & (offs_cn[None, :] < expert_dim)
+    tl.store(
+        output_ptrs,
+        acc.to(tl.float16),
+        mask=output_mask
+    )
+
+def calculate_moe_kernel_input_bytes(
+    A,                    # Input tensor (tokens)
+    B,                    # Weight tensor (expert weights)
+    C,                    # Output tensor
+    A_scale,             # Optional scale for A
+    B_scale,             # Optional scale for B
+    topk_weights,        # Top-k weights
+    sorted_token_ids,    # Sorted token indices
+    expert_ids,          # Expert indices
+    use_int8_w8a16=False # Flag for int8 mode
+):
+    total_bytes = 0
+
+    # 1. Essential memory reads (cannot be cached in L2/SRAM)
+    # Input tokens - each token is read once
+    total_bytes += A.shape[0] * A.shape[1] * A.element_size()
+
+    # Expert weights - each expert's weights are read only when needed
+    # We only count the actual experts used, not the entire weight tensor
+    num_unique_experts = torch.unique(expert_ids).numel()
+    expert_weight_size = B.shape[1] * B.shape[2] * B.element_size()
+    total_bytes += num_unique_experts * expert_weight_size
+
+    # 2. Routing information (small, might be cached)
+    total_bytes += topk_weights.numel() * topk_weights.element_size()
+    total_bytes += sorted_token_ids.numel() * sorted_token_ids.element_size()
+    total_bytes += expert_ids.numel() * expert_ids.element_size()
+
+    # 3. Scales for quantization (small, likely cached)
+    if A_scale is not None:
+        total_bytes += A_scale.numel() * A_scale.element_size()
+    if B_scale is not None and use_int8_w8a16:
+        # Only count scales for actually used experts
+        total_bytes += num_unique_experts * B_scale.shape[1] * B_scale.element_size()
+
+    # 4. Output writes
+    # Each token produces one output
+    total_bytes += C.shape[0] * C.shape[1] * C.element_size()
+
+    return total_bytes

@@ -90,11 +90,33 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        with proton.scope("LlamaMLP gate-up proj"):
+        with proton.scope("LlamaMLP gate-up proj", metrics={
+            "bytes(exc)": (
+                # Input tensor
+                x.numel() * x.element_size() +
+                # Gate and up projection weights
+                # self.gate_up_proj.weight.numel() * self.gate_up_proj.weight.element_size() +
+                get_weight_size(self.gate_up_proj) + 
+                # Bias if present
+                # (self.gate_up_proj.bias.numel() * self.gate_up_proj.bias.element_size() if self.gate_up_proj.bias is not None else 0)
+                get_bias_size(self.gate_up_proj)
+            )
+        }):
             x, _ = self.gate_up_proj(x)
         with proton.scope("LlamaMLP activation fn"):
             x = self.act_fn(x)
-        with proton.scope("LlamaMLP down proj"):
+        with proton.scope("LlamaMLP down proj", metrics={
+            "bytes(exc)": (
+                # Input tensor
+                x.numel() * x.element_size() +
+                # Down projection weights
+                # self.down_proj.weight.numel() * self.down_proj.weight.element_size() +
+                get_weight_size(self.down_proj) +
+                # Bias if present
+                # (self.down_proj.bias.numel() * self.down_proj.bias.element_size() if self.down_proj.bias is not None else 0)
+                get_bias_size(self.down_proj)
+            )
+        }):
             x, _ = self.down_proj(x)
         return x
 
@@ -186,17 +208,66 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        with proton.scope("LlamaAttention forward: qkv_proj"):
+        with proton.scope("LlamaAttention forward: qkv_proj", metrics={
+            "bytes(exc)": (
+                # Input tensor
+                hidden_states.numel() * hidden_states.element_size() +
+                # QKV projection weights (quantized or not)
+                get_weight_size(self.qkv_proj) +
+                # Bias if present
+                get_bias_size(self.qkv_proj)
+            )}):
             qkv, _ = self.qkv_proj(hidden_states)
-        with proton.scope("LlamaAttention forward: qkv split"):
+        with proton.scope("LlamaAttention forward: qkv split", metrics={
+            "bytes(exc)": qkv.numel() * qkv.element_size()  # Reading the combined QKV tensor
+        }):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        with proton.scope("LlamaAttention forward: rotary_emb"):
+        with proton.scope("LlamaAttention forward: rotary_emb", metrics={
+            "bytes(exc)": (
+                # Query and key tensors
+                (q.numel() + k.numel()) * q.element_size() +
+                # Position embeddings
+                positions.numel() * positions.element_size()
+            )}):
             q, k = self.rotary_emb(positions, q, k)
         with proton.scope("LlamaAttention forward: attn"):
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        with proton.scope("LlamaAttention forward: output_proj"):
+        with proton.scope("LlamaAttention forward: output_proj", metrics={
+            "bytes(exc)": (
+                # Input tensor
+                attn_output.numel() * attn_output.element_size() +
+                # Output projection weights (quantized or not)
+                get_weight_size(self.o_proj) +
+                # Bias if present
+                get_bias_size(self.o_proj)
+            )}):
             output, _ = self.o_proj(attn_output)
         return output
+
+
+def get_weight_tensor(layer: torch.nn.Module) -> torch.Tensor:
+    """Helper function to get weight tensor regardless of quantization."""
+    if hasattr(layer, 'weight'):
+        return layer.weight
+    elif hasattr(layer, 'qweight'):
+        return layer.qweight
+    else:
+        raise AttributeError(f"Layer {type(layer)} has neither 'weight' nor 'qweight' attribute")
+
+def get_weight_size(layer):
+    """Helper to get weight size accounting for both normal and quantized weights"""
+    if hasattr(layer, 'weight'):
+        return layer.weight.numel() * layer.weight.element_size()
+    elif hasattr(layer, 'qweight'):
+        return layer.qweight.numel() * layer.qweight.element_size()
+    return 0
+
+def get_bias_size(layer):
+    """Helper to get bias size if present"""
+    if hasattr(layer, 'bias') and layer.bias is not None:
+        return layer.bias.numel() * layer.bias.element_size()
+    return 0
+
 
 
 class LlamaDecoderLayer(nn.Module):

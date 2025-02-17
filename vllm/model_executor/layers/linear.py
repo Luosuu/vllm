@@ -132,9 +132,31 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        with proton.scope("unquantized_linear", metrics={
+            "bytes(exc)": calculate_linear_bytes(x, layer.weight, bias)
+        }):
+            out = F.linear(x, layer.weight, bias)
+        return out
 
-        return F.linear(x, layer.weight, bias)
 
+def calculate_linear_bytes(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None
+) -> int:
+    total_bytes = 0
+
+    # Input activation
+    total_bytes += x.numel() * x.element_size()
+
+    # Weight matrix
+    total_bytes += weight.numel() * weight.element_size()
+
+    # Bias if present
+    if bias is not None:
+        total_bytes += bias.numel() * bias.element_size()
+
+    return total_bytes
 
 class LinearBase(torch.nn.Module):
     """Base linear layer.
@@ -369,7 +391,7 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        with proton.scope("linear"):
+        with proton.scope("ColumnParallelLinear linear matmul"):
             output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
