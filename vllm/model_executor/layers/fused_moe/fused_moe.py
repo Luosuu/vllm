@@ -1062,47 +1062,58 @@ def dispatch_autotune_moe(
     # Group tokens by expert
     for expert_id in range(num_experts):
         expert_mask = (sorted_expert_ids == expert_id)
-        tokens_this_expert = sorted_tokens[expert_mask] # TODO: this is time-consuming, we should remove it and mask the tokens in the kernel instead
-        scores_this_expert = sorted_scores[expert_mask]
-        token_indices = original_indices[expert_mask]
-        pos_indices = expert_pos[expert_mask]
-        # TODO: check whether tokens_this_expert is empty
-        if tokens_this_expert.size(0) == 0:
+        if not expert_mask.any():
             continue
-        # M, N = tokens.shape
-        # K, N = expert_weights.shape
-        # 1D launch grid
-        num_tokens = tokens_this_expert.shape[0]
-        expert_dim = expert_weights.shape[1]
+
+        # Get indices where this expert is used
+        token_start_idx = torch.where(expert_mask)[0][0].item() # need to be Python INT
+        token_end_idx = torch.where(expert_mask)[0][-1].item()  + 1 # need to be Python INT
+        num_tokens_this_expert = expert_mask.sum()
+        expert_dim = expert_weights.shape[2]
+
+        # expert_dim = expert_weights.shape[2]
+        # tokens_this_expert = sorted_tokens[expert_mask] # TODO: this is time-consuming, we should remove it and mask the tokens in the kernel instead
+        # scores_this_expert = sorted_scores[expert_mask]
+        # token_indices = original_indices[expert_mask]
+        # pos_indices = expert_pos[expert_mask]
+        # # TODO: check whether tokens_this_expert is empty
+        # if tokens_this_expert.size(0) == 0:
+        #     continue
+        # # M, N = tokens.shape
+        # # K, N = expert_weights.shape
+        # # 1D launch grid
+        # num_tokens = tokens_this_expert.shape[0]
+        # expert_dim = expert_weights.shape[1]
         # output_indices = torch.where(expert_mask)[0]
         # TODO: change to lambda expression to address 
         # https://docs.astral.sh/ruff/rules/function-uses-loop-variable/
         def grid(meta):
-            return (triton.cdiv(tokens_this_expert.shape[0], meta["BLOCK_SIZE_M"]) *
-            triton.cdiv(expert_weights.shape[1], meta["BLOCK_SIZE_N"]),)
+            return (triton.cdiv(num_tokens_this_expert, meta["BLOCK_SIZE_M"]) *
+                   triton.cdiv(expert_dim, meta["BLOCK_SIZE_N"]),)
 
-        # Create temporary output buffer
-        output_this_expert = torch.zeros(
-            tokens_this_expert.size(0), expert_weights.size(1),
-            dtype=output.dtype, device=output.device
-        )
+        # Create temporary output buffer for this expert's results
+        # output_this_expert = torch.zeros(
+        #     num_tokens_this_expert, expert_weights.size(1),
+        #     dtype=output.dtype, device=output.device
+        # )
         autotune_moe_kernel[grid](
             tokens_ptr=sorted_tokens,  # give ptr to entire input tokens
-            # tokens_start= , # speficy the location of tokens for this expert
-            # tokend_end= ,
-            expert_weight_ptr=expert_weights[expert_id], 
-            # expert_id = expert_id,
-            scores_ptr=scores_this_expert,
-            output_ptr=output_this_expert,
+            token_start_idx= token_start_idx, # speficy the location of tokens for this expert
+            token_end_idx=token_end_idx,
+            expert_weight_ptr=expert_weights, 
+            expert_id = expert_id,
+            scores_ptr=sorted_scores,
+            output_ptr=output,
+            # output_ptr=output_this_expert,
             # sorted_expert_ids_ptr=sorted_expert_ids, # maybe useless
             # scores_ptr=sorted_scores, 
-            num_tokens=num_tokens, 
+            num_tokens=num_tokens_this_expert, 
             expert_dim=expert_dim, 
             hidden_dim=tokens.shape[1],
             num_experts=num_experts, # maybe useless
             stride_token=tokens.stride(0), 
             stride_input_feature_dim =tokens.stride(1),
-            stride_experts=expert_weights.stride(0), # maybe useless
+            stride_experts=expert_weights.stride(0),
             stride_in_dim_weight=expert_weights.stride(2),
             stride_out_dim_weight=expert_weights.stride(1),
             stride_output_token=output.stride(1),
@@ -1110,8 +1121,13 @@ def dispatch_autotune_moe(
             MUL_ROUTED_WEIGHT=mul_routed_weight,
             top_k=top_k,
         )
-        # Scatter back to 3D output using both indices
-        output[token_indices, pos_indices] += output_this_expert
+
+        # Get the indices for this expert
+        # mask_indices = torch.where(expert_mask)[0]
+        # token_indices = original_indices[mask_indices]
+        # pos_indices = expert_pos[mask_indices]
+        # # Scatter back to 3D output using both indices
+        # output[token_indices, pos_indices] += output_this_expert
 
     return output
 
@@ -1121,19 +1137,21 @@ def dispatch_autotune_moe(
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
     ],
-    key=['num_tokens', 'hidden_dim', 'expert_dim'],
+    key=['num_tokens', 'hidden_dim', 'expert_dim',],
 )
 @triton.jit
 def autotune_moe_kernel(
         tokens_ptr, # Input tensor [num_tokens, dim]
         expert_weight_ptr,  # Expert weight [dim, expert_capacity]
-        # expert_id, # 
+        expert_id, # which expert to use
         scores_ptr, # scores for this expert
         output_ptr, # Output tensor [num_tokens, dim]
         # a_scale_ptr, # used for quantization
         # b_scale_ptr, # used for quantization
         # sorted_expert_ids_ptr,  
         num_tokens, 
+        token_start_idx, # token start idx for one kernel run
+        token_end_idx, # token end idx for one kernel run
         expert_dim, # N, # Output feature dimension
         hidden_dim, # K, # Input feature dimension
         num_experts,
@@ -1169,8 +1187,7 @@ def autotune_moe_kernel(
     num_pid_n = tl.cdiv(expert_dim, BLOCK_SIZE_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
-    # pid_expert = tl.program_id(1)  # determine which expert for this program
-
+    
     # Create block offsets
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -1179,32 +1196,34 @@ def autotune_moe_kernel(
     # `token_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `expert_weight_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
 
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_m = token_start_idx + pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     # boundary handling
-    token_mask = offs_m < num_tokens
-    
-    
+    token_mask = (offs_m < token_end_idx) & (offs_m >= token_start_idx)
+    # input pointers
+    block_token_ptrs = tokens_ptr + (offs_m[:, None] // top_k * stride_token + 
+        offs_k[None, :] * stride_input_feature_dim)
+    # init accumulator
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     # blocked processing
     for k in range(0, tl.cdiv(hidden_dim, BLOCK_SIZE_K)):
-        block_token_ptrs = (
-            tokens_ptr +
-            offs_m[:, None] * stride_token +
-            (k + offs_k[None, :]) * stride_input_feature_dim
-        ) # advance pointers for input tokens
+        # block_token_ptrs = ( ## problematic
+        #     tokens_ptr +
+        #     offs_m[:, None] // top_k * stride_token + 
+        #     (k + offs_k[None, :]) * stride_input_feature_dim
+        # ) # advance pointers for input tokens
         tokens = tl.load(
             block_token_ptrs,
-            mask=token_mask[:, None] & (k + offs_k[None, :] < hidden_dim),
+            mask=token_mask[:, None] & 
+            (offs_k[None, :] < hidden_dim - k * BLOCK_SIZE_K),
             other=0.0
         )
-
-        # Load weight block
+        # Load corresponding expert weight block
         weight_ptrs = (
-            expert_weight_ptr +
-            (k + offs_k[:, None]) * stride_in_dim_weight +
-            offs_n[None, :] * stride_out_dim_weight
+            expert_weight_ptr + expert_id * stride_experts + # go to that expert
+            (k + offs_k[:, None]) * stride_in_dim_weight + # block k dim
+            offs_n[None, :] * stride_out_dim_weight # block n dim
         ) # advance pointers for weight block
         weights = tl.load(
             weight_ptrs,
@@ -1213,29 +1232,34 @@ def autotune_moe_kernel(
         )
         # Accumulate
         acc += tl.dot(tokens, weights, allow_tf32=True)
+        # Advance pointers
+        block_token_ptrs += BLOCK_SIZE_K * stride_input_feature_dim
 
     # Apply expert scores if needed
     if MUL_ROUTED_WEIGHT:
         scores = tl.load(
-            scores_ptr + offs_m,
+            scores_ptr + offs_m, 
             mask=token_mask,
             other=0.0
         )
         acc = acc * scores[:, None]
+    # Convert back to fp16
+    acc.to(tl.float16)
 
-    # Store output [BLOCK_SIZE_M, BLOCK_SIZE_N]
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+
+    # -----------------------------------------------------------
+    # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     output_ptrs = (
         output_ptr + 
         offs_m[:, None] * stride_output_token + 
-        offs_n[None, :] * stride_output_feature_dim
+        offs_cn[None, :] * stride_output_feature_dim
     )
-    output_mask = (offs_cm[:, None] < num_tokens) & (offs_cn[None, :] < expert_dim)
+    output_mask = token_mask[:, None] & (offs_cn[None, :] < expert_dim)
     tl.store(
         output_ptrs,
-        acc.to(tl.float16),
-        mask=output_mask
+        acc.to(tl.float16), # invalid address access, out of boundary
+        mask=output_mask # share the same range mask of input
     )
 
 def calculate_moe_kernel_input_bytes(
