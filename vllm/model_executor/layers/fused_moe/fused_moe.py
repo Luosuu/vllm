@@ -968,15 +968,17 @@ def fused_experts_autotune_impl(
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+    M = min(num_tokens, CHUNK_SIZE)
 
     # Allocate intermediate buffers
-    intermediate_cache1 = torch.empty((num_tokens, topk_ids.shape[1], N),
+    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                     device=hidden_states.device,
                                     dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty((num_tokens * topk_ids.shape[1], N // 2),
+    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
                                     device=hidden_states.device,
                                     dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((num_tokens, topk_ids.shape[1], w2.shape[1]),
+    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
@@ -985,33 +987,54 @@ def fused_experts_autotune_impl(
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    # First MLP + routing using autotuned dispatch
-    dispatch_autotune_moe(
-        tokens=hidden_states,
-        expert_weights=w1,
-        output=intermediate_cache1,
-        topk_ids=topk_ids,
-        expert_scores=topk_weights,
-        mul_routed_weight=False,
-        top_k=topk_ids.shape[1]
-    )
+    for chunk in range((num_tokens // CHUNK_SIZE) + 1):
+        begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
+                                          min((chunk + 1) * CHUNK_SIZE,
+                                              num_tokens))
+        curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
+        tokens_in_chunk, _ = curr_hidden_states.shape
 
-    # Activation function
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+        if tokens_in_chunk == 0:
+            break
 
-    # Second MLP using autotuned dispatch
-    dispatch_autotune_moe(
-        tokens=intermediate_cache2,
-        expert_weights=w2,
-        output = intermediate_cache3,
-        topk_ids=topk_ids,
-        expert_scores=topk_weights,
-        mul_routed_weight=True,
-        top_k=1
-    )
+        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+            # Adjust the intermediate cache size and config for the last
+            # chunk. Note that in most cases we only have one chunk
+            # so the cache size and config are already set correctly and
+            # do not need to be adjusted.
+            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
+            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk]
+            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
 
-    ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-        out_hidden_states)
+        curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
+        curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
+        # First MLP + routing using autotuned dispatch
+        dispatch_autotune_moe(
+            tokens=curr_hidden_states,
+            expert_weights=w1,
+            output=intermediate_cache1,
+            topk_ids=curr_topk_ids,
+            expert_scores=curr_topk_weights,
+            mul_routed_weight=False,
+            top_k=curr_topk_ids.shape[1]
+        )
+
+        # Activation function
+        ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+
+        # Second MLP using autotuned dispatch
+        dispatch_autotune_moe(
+            tokens=intermediate_cache2,
+            expert_weights=w2,
+            output = intermediate_cache3,
+            topk_ids=curr_topk_ids,
+            expert_scores=curr_topk_weights,
+            mul_routed_weight=True,
+            top_k=1
+        )
+
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+            out_hidden_states[begin_chunk_idx:end_chunk_idx])
 
     return out_hidden_states
 
