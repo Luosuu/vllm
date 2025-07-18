@@ -97,6 +97,11 @@ if TYPE_CHECKING:
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
+    # LLMProf: Proton profiling control
+    VLLM_LLMPROF_ENABLE_AUTO_PROFILE: bool = False
+    VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL: int = 100
+    VLLM_LLMPROF_PROFILE_DIR: str = "profiles"
+    VLLM_LLMPROF_DEBUG: bool = False
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
@@ -870,6 +875,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # ================== LLMProf: Proton Profiling Control ==================
+
+    # Enable automatic Proton profile rotation
+    "VLLM_LLMPROF_ENABLE_AUTO_PROFILE":
+    lambda: os.environ.get("VLLM_LLMPROF_ENABLE_AUTO_PROFILE", "false").lower() in ("1", "true"),
+
+    # Number of completed requests before rotating profile (saving current and starting new)
+    "VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL":
+    lambda: int(os.environ.get("VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL", "100")),
+
+    # Directory to save Proton profiles
+    "VLLM_LLMPROF_PROFILE_DIR":
+    lambda: os.environ.get("VLLM_LLMPROF_PROFILE_DIR", "profiles"),
+
+    # Debug logging for LLMProf
+    "VLLM_LLMPROF_DEBUG":
+    lambda: os.environ.get("VLLM_LLMPROF_DEBUG", "false").lower() in ("1", "true"),
 }
 
 # --8<-- [end:env-vars-definition]

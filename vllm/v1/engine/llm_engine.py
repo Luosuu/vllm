@@ -113,6 +113,14 @@ class LLMEngine:
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
+        # LLMProf: Forward profiling attributes from V1 engine core
+        if hasattr(self.engine_core, 'engine_core'):
+            engine_core = self.engine_core.engine_core
+            self.proton_completed_requests = getattr(engine_core, 'proton_completed_requests', None)
+            self.proton_session_id = getattr(engine_core, 'proton_session_id', None)
+            self.proton_profile_interval = getattr(engine_core, 'proton_profile_interval', None)
+            self.proton_profile_dir = getattr(engine_core, 'proton_profile_dir', None)
+
     @classmethod
     def from_vllm_config(
         cls,

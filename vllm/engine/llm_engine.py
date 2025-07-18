@@ -8,6 +8,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
@@ -61,6 +62,13 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
 from vllm.utils import Counter, Device, resolve_obj_by_qualname, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
+
+# LLMProf: Import Proton profiler for server-side profiling
+try:
+    import triton.profiler as proton
+    PROTON_AVAILABLE = True
+except ImportError:
+    PROTON_AVAILABLE = False
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -255,6 +263,29 @@ class LLMEngine:
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
+        
+        # LLMProf: Initialize Proton profiling session management
+        if envs.VLLM_LLMPROF_DEBUG:
+            logger.info("LLMProf: V0 Engine initialization - Debug mode enabled")
+            logger.info("LLMProf: PROTON_AVAILABLE=%s, ENABLE_AUTO_PROFILE=%s", 
+                       PROTON_AVAILABLE, envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE)
+        
+        if PROTON_AVAILABLE and envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE:
+            logger.info("LLMProf: Initializing automatic profile rotation in V0 engine")
+            self.proton_completed_requests = 0
+            self.proton_session_id = None
+            self.proton_current_session_dir = None
+            self.proton_profile_interval = (
+                envs.VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL)
+            self.proton_profile_dir = Path(envs.VLLM_LLMPROF_PROFILE_DIR)
+            logger.info("LLMProf: Profile interval=%d, dir=%s", 
+                       self.proton_profile_interval, self.proton_profile_dir)
+            self._start_new_proton_session()
+        else:
+            self.proton_session_id = None
+            if envs.VLLM_LLMPROF_DEBUG:
+                logger.info("LLMProf: Auto profiling not enabled or Proton not available")
+        
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
 
@@ -401,6 +432,15 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # LLMProf: Forward profiling attributes from V1 engine core if available
+        # This handles the case where the engine is created via V1 path
+        if hasattr(self, 'engine_core') and hasattr(self.engine_core, 'engine_core'):
+            engine_core = self.engine_core.engine_core
+            self.proton_completed_requests = getattr(engine_core, 'proton_completed_requests', None)
+            self.proton_session_id = getattr(engine_core, 'proton_session_id', None)
+            self.proton_profile_interval = getattr(engine_core, 'proton_profile_interval', None)
+            self.proton_profile_dir = getattr(engine_core, 'proton_profile_dir', None)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -865,6 +905,84 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    def _start_new_proton_session(self) -> None:
+        """Start a new Proton profiling session with timestamp-based naming."""
+        if not (PROTON_AVAILABLE and 
+                envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE):
+            return
+        
+        import os
+        timestamp = int(time.time())
+        model_name = self.model_config.model.replace("/", "--")
+        session_name = f"llm_engine_{model_name}_{timestamp}"
+        
+        # Create profile directory structure
+        profile_session_dir = (self.proton_profile_dir / 
+                              model_name / 
+                              f"session_{timestamp}")
+        profile_session_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Store the session directory for later use
+        self.proton_current_session_dir = profile_session_dir
+        
+        # Change to profile directory for output
+        original_cwd = os.getcwd()
+        os.chdir(str(profile_session_dir))
+        
+        try:
+            self.proton_session_id = proton.start(session_name)
+            proton.activate(self.proton_session_id)
+            logger.info("Started Proton session: %s in %s", 
+                       session_name, profile_session_dir)
+        except Exception as e:
+            logger.warning("Failed to start Proton session: %s", e)
+            self.proton_session_id = None
+        finally:
+            os.chdir(original_cwd)
+
+    def _finalize_proton_session_if_needed(self, 
+                                          num_finished_requests: int) -> None:
+        """
+        Finalize current Proton session and start new one if we've hit 
+        the request threshold.
+        """
+        if not (PROTON_AVAILABLE and 
+                envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE and 
+                self.proton_session_id is not None):
+            return
+        
+        self.proton_completed_requests += num_finished_requests
+        logger.info("LLMProf: Completed requests: %d/%d", 
+                   self.proton_completed_requests, self.proton_profile_interval)
+        
+        if (self.proton_completed_requests >= 
+            self.proton_profile_interval):
+            try:
+                # Change to session directory and finalize
+                import os
+                original_cwd = os.getcwd()
+                try:
+                    if self.proton_current_session_dir:
+                        os.chdir(str(self.proton_current_session_dir))
+                        
+                        # Finalize current session (saves profile)
+                        proton.finalize(self.proton_session_id)
+                        logger.info("Finalized Proton session after %d requests in %s",
+                                   self.proton_completed_requests, self.proton_current_session_dir)
+                    else:
+                        logger.warning("No current session directory for finalization")
+                        
+                finally:
+                    os.chdir(original_cwd)
+                
+                # Reset counter and start new session
+                self.proton_completed_requests = 0
+                self._start_new_proton_session()
+                
+            except Exception as e:
+                logger.warning("Failed to finalize Proton session: %s", e)
+                self.proton_session_id = None
+
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
         return self.input_preprocessor.mm_registry.reset_processor_cache()
@@ -1290,10 +1408,17 @@ class LLMEngine:
         if not self._has_remaining_steps(
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
-            # Schedule iteration
-            (seq_group_metadata_list, scheduler_outputs,
-             allow_async_output_proc
-             ) = self.scheduler[virtual_engine].schedule()
+            # LLMProf: Schedule iteration with profiling
+            if PROTON_AVAILABLE:
+                with proton.scope("llm_engine_schedule"):
+                    (seq_group_metadata_list, scheduler_outputs,
+                     allow_async_output_proc
+                     ) = self.scheduler[virtual_engine].schedule()
+            else:
+                # Schedule iteration
+                (seq_group_metadata_list, scheduler_outputs,
+                 allow_async_output_proc
+                 ) = self.scheduler[virtual_engine].schedule()
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1305,6 +1430,11 @@ class LLMEngine:
             for finished_request_id in finished_requests_ids:
                 if finished_request_id in self.seq_id_to_seq_group:
                     del self.seq_id_to_seq_group[finished_request_id]
+
+            # LLMProf: Check if we should finalize current Proton session
+            if finished_requests_ids:
+                self._finalize_proton_session_if_needed(
+                    len(finished_requests_ids))
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -1349,8 +1479,14 @@ class LLMEngine:
                     virtual_engine]
 
             try:
-                outputs = self.model_executor.execute_model(
-                    execute_model_req=execute_model_req)
+                # LLMProf: Model execution with profiling
+                if PROTON_AVAILABLE:
+                    with proton.scope("llm_engine_model_execution"):
+                        outputs = self.model_executor.execute_model(
+                            execute_model_req=execute_model_req)
+                else:
+                    outputs = self.model_executor.execute_model(
+                        execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1412,7 +1548,12 @@ class LLMEngine:
 
             # Check if need to run the usual non-async path
             if not allow_async_output_proc:
-                self._process_model_outputs(ctx=ctx)
+                # LLMProf: Output processing with profiling
+                if PROTON_AVAILABLE:
+                    with proton.scope("llm_engine_output_processing"):
+                        self._process_model_outputs(ctx=ctx)
+                else:
+                    self._process_model_outputs(ctx=ctx)
 
                 # Log stats.
                 self.do_log_stats(scheduler_outputs, outputs)
@@ -1426,7 +1567,12 @@ class LLMEngine:
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
             if len(ctx.output_queue) > 0:
-                self._process_model_outputs(ctx=ctx)
+                # LLMProf: Final output processing with profiling
+                if PROTON_AVAILABLE:
+                    with proton.scope("llm_engine_final_output_processing"):
+                        self._process_model_outputs(ctx=ctx)
+                else:
+                    self._process_model_outputs(ctx=ctx)
             assert len(ctx.output_queue) == 0
 
             # Stop the execute model loop in parallel workers until there are

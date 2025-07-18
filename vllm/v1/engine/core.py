@@ -12,12 +12,14 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
+from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
+import vllm.envs as envs
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
@@ -43,6 +45,13 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.version import __version__ as VLLM_VERSION
+
+# LLMProf: Import Proton profiler for server-side profiling
+try:
+    import proton
+    PROTON_AVAILABLE = True
+except ImportError:
+    PROTON_AVAILABLE = False
 
 logger = init_logger(__name__)
 
@@ -128,6 +137,114 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+
+        # LLMProf: Initialize Proton profiling session management
+        if PROTON_AVAILABLE and envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE:
+            self.proton_completed_requests = 0
+            self.proton_session_id = None
+            self.proton_profile_interval = (
+                envs.VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL)
+            self.proton_profile_dir = Path(envs.VLLM_LLMPROF_PROFILE_DIR)
+            self._start_new_proton_session()
+        else:
+            self.proton_completed_requests = None
+            self.proton_session_id = None
+            self.proton_profile_interval = None
+            self.proton_profile_dir = None
+
+    def _start_new_proton_session(self):
+        """Start a new Proton profiling session."""
+        if not (PROTON_AVAILABLE and 
+                envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE):
+            return
+        
+        import datetime
+        
+        # Generate session name based on timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"session_{timestamp}"
+        
+        # Create profile directory structure
+        model_name = self.vllm_config.model_config.model.replace('/', '_')
+        session_dir = self.proton_profile_dir / model_name / session_name
+        session_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Try different hooks to find one that works
+            hooks_to_try = [None, "None", "triton"]
+            session_started = False
+            
+            for hook in hooks_to_try:
+                try:
+                    # proton.start returns session_id (int)
+                    session_id = proton.start(session_name, hook=hook)
+                    self.proton_session_id = session_id
+                    logger.info("Started Proton profiling session: %s (ID: %d, hook: %s)", 
+                               session_name, session_id, hook)
+                    logger.info("Profiles will be saved to: %s", session_dir)
+                    session_started = True
+                    break
+                except Exception as hook_e:
+                    logger.debug("Failed to start Proton with hook %s: %s", hook, hook_e)
+                    continue
+            
+            if not session_started:
+                raise RuntimeError("All Proton hooks failed")
+                
+        except Exception as e:
+            logger.warning("Failed to start Proton session: %s", e)
+            self.proton_session_id = None
+
+    def _finalize_proton_session(self):
+        """Finalize current Proton profiling session and save profile."""
+        if not (PROTON_AVAILABLE and 
+                envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE and
+                self.proton_session_id):
+            return
+        
+        try:
+            # Create profile file path using the session ID
+            model_name = self.vllm_config.model_config.model.replace('/', '_')
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_name = f"session_{timestamp}"
+            session_dir = self.proton_profile_dir / model_name / session_name
+            session_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Change to session directory for profile output
+            import os
+            original_dir = os.getcwd()
+            os.chdir(session_dir)
+            
+            # Finalize the session with correct arguments (session_id: int, output_format: str)
+            try:
+                proton.finalize(self.proton_session_id, "hatchet")
+                logger.info("Saved Proton profile for session ID: %d", self.proton_session_id)
+            except Exception as finalize_e:
+                logger.warning("Failed to finalize Proton session ID %s: %s", 
+                             self.proton_session_id, finalize_e)
+            
+            # Restore original directory
+            os.chdir(original_dir)
+            
+        except Exception as e:
+            logger.warning("Failed to finalize Proton session: %s", e)
+        finally:
+            self.proton_session_id = None
+
+    def _rotate_proton_profile_if_needed(self):
+        """Rotate Proton profile if interval reached."""
+        if not (PROTON_AVAILABLE and 
+                envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE and
+                self.proton_completed_requests is not None):
+            return
+        
+        if (self.proton_completed_requests > 0 and 
+            self.proton_completed_requests % self.proton_profile_interval == 0):
+            logger.info("Rotating Proton profile after %d requests", 
+                       self.proton_completed_requests)
+            self._finalize_proton_session()
+            self._start_new_proton_session()
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -231,6 +348,17 @@ class EngineCore:
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
+
+        # LLMProf: Count completed requests and rotate profile if needed
+        if (PROTON_AVAILABLE and 
+            envs.VLLM_LLMPROF_ENABLE_AUTO_PROFILE and
+            self.proton_completed_requests is not None):
+            # Count completed requests
+            completed_count = sum(len(outputs.outputs) for outputs in engine_core_outputs.values() 
+                                 if outputs.outputs)
+            if completed_count > 0:
+                self.proton_completed_requests += completed_count
+                self._rotate_proton_profile_if_needed()
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
