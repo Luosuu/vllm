@@ -55,6 +55,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+import triton.profiler as proton
 
 class LlamaMLP(nn.Module):
 
@@ -69,6 +70,8 @@ class LlamaMLP(nn.Module):
         reduce_results: bool = True,
     ) -> None:
         super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
@@ -90,9 +93,38 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
-        x, _ = self.down_proj(x)
+        es = _elem_size_like(x)
+        ntok = _ntok(x, self.hidden_size)
+        H = self.hidden_size
+        I = self.intermediate_size
+
+        # ---- gate_up_proj ----
+        # Linear: read X + read W (+b) + write Y([gate|up] concat)
+        y_gate_up_elems = 2 * I
+        bytes_gate_up_out = ntok * y_gate_up_elems * es
+        bytes_gate_up_in  = ntok * H * es
+        bytes_gate_up_w   = _param_bytes(self.gate_up_proj)
+        with proton.cpu_timed_scope(
+            "gate_up_proj",
+            {"bytes": bytes_gate_up_in + bytes_gate_up_w + bytes_gate_up_out},
+        ):
+            x, _ = self.gate_up_proj(x)  # x now shape [..., 2I]
+
+        # ---- act_fn (SiluAndMul) ----
+        # Expectation: read both halves (I + I) and write one result (I)
+        bytes_act_reads  = ntok * (2 * I) * es
+        bytes_act_writes = ntok * I * es
+        with proton.cpu_timed_scope("act_fn", {"bytes": bytes_act_reads + bytes_act_writes}):
+            x = self.act_fn(x)  # x becomes [..., I]
+
+        # ---- down_proj ----
+        # Linear: read X(I) + read W (+b) + write Y(H)
+        bytes_down_in  = ntok * I * es
+        bytes_down_w   = _param_bytes(self.down_proj)
+        bytes_down_out = ntok * H * es
+        with proton.cpu_timed_scope("down_proj", {"bytes": bytes_down_in + bytes_down_w + bytes_down_out}):
+            x, _ = self.down_proj(x)
+
         return x
 
 
@@ -185,16 +217,71 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        sliding_window = None
+        if layer_types := getattr(config, "layer_types", None):
+            is_sliding = layer_types[layer_idx] == "sliding_attention"
+            if is_sliding:
+                sliding_window = config.sliding_window
+        self.sliding_window = sliding_window  # <— keep it
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        # Common scalars
+        es = _elem_size_like(hidden_states)
+        ntok = _tokens(hidden_states, self.hidden_size)  # batch*seq
+        # Shapes per token
+        q_elems_per_tok  = self.q_size
+        kv_elems_per_tok = self.kv_size
+        o_elems_per_tok  = self.num_heads * self.head_dim  # attn output before o_proj
+
+        # ---- QKV PROJ ----
+        # Linear: read X + read W (+b) + write Y(qkv)
+        qkv_elems_per_tok = q_elems_per_tok + 2 * kv_elems_per_tok
+        qkv_bytes = ntok * qkv_elems_per_tok * es
+        qkv_proj_param_bytes = _param_bytes(self.qkv_proj)
+        qkv_proj_bytes = hidden_states.numel() * es + qkv_proj_param_bytes + qkv_bytes
+        with proton.cpu_timed_scope("qkv_proj", {"bytes": qkv_proj_bytes}):
+            qkv, _ = self.qkv_proj(hidden_states)
+        with proton.cpu_timed_scope("split_qkv"):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # ---- ROTARY ----
+        # Read q,k and write q',k' (out-of-place lower bound) + rope table reads
+        rope_tbl_bytes = _rope_table_bytes(positions, self.head_dim, self.partial_rotary_factor, es)
+        rotary_bytes = (q.numel() + k.numel()) * es * 2 + rope_tbl_bytes
+        with proton.cpu_timed_scope("rotary_emb", {"bytes": rotary_bytes}):
+            q, k = self.rotary_emb(positions, q, k)
+        # ---- ATTENTION (GQA, no sliding window) ----
+        # Lower bound for flash-style attention: read Q,K,V + write O
+        attn_out_bytes   = ntok * o_elems_per_tok * es
+        attn_core_bytes  = (q.numel() + k.numel() + v.numel()) * es + attn_out_bytes
+
+        from vllm.forward_context import get_forward_context
+        attn_metadata = get_forward_context().attn_metadata
+        # Calculate KV cache HBM access bytes (works for prefill + decode)
+        kv_cache_bytes = (k.numel() + v.numel()) * es  # Always write new K,V
+        # Add cache reads based on context length
+        if hasattr(attn_metadata, 'context_lens_tensor') and attn_metadata.context_lens_tensor is not None:
+            context_tokens = attn_metadata.context_lens_tensor.sum().item()
+            kv_cache_bytes += context_tokens * 2 * self.num_kv_heads * self.head_dim * es
+
+        with proton.cpu_timed_scope(
+            "attn",
+            {"bytes": attn_core_bytes + kv_cache_bytes},
+        ):
+            attn_output = self.attn(q, k, v)
+
+        # ---- O PROJ ----
+        # Linear: read O + read W (+b) + write final out
+        o_proj_param_bytes = _param_bytes(self.o_proj)
+        # output has same token count * hidden_size
+        out_bytes = ntok * self.hidden_size * es
+        o_proj_bytes = attn_output.numel() * es + o_proj_param_bytes + out_bytes
+        with proton.cpu_timed_scope("o_proj", {"bytes": o_proj_bytes}):
+            output, _ = self.o_proj(attn_output)
+
         return output
 
     def _init_rotary_emb(self, config: LlamaConfig,
@@ -295,13 +382,16 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+        with proton.cpu_timed_scope("self_attn"):
+            hidden_states = self.self_attn(positions=positions,
+                                           hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        with proton.cpu_timed_scope("post_attention_layernorm"):
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
+        with proton.cpu_timed_scope("mlp"):
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -370,7 +460,8 @@ class LlamaModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                with proton.cpu_timed_scope("get_input_embeddings"):
+                    hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -382,7 +473,8 @@ class LlamaModel(nn.Module):
                 self.layers[self.start_layer:self.end_layer]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            with proton.cpu_timed_scope(f"DecoderLayer"):
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -638,3 +730,30 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+def _param_bytes(mod: torch.nn.Module) -> int:
+    # Count local params only (single-GPU case = all params)
+    return sum(p.numel() * p.element_size() for p in mod.parameters(recurse=False))
+
+def _elem_size_like(x: torch.Tensor) -> int:
+    return x.element_size()
+
+def _tokens(hidden_states: torch.Tensor, hidden_size: int) -> int:
+    # total tokens across batch*seq (assumes last dim = hidden_size)
+    return hidden_states.numel() // hidden_size
+
+def _rope_table_bytes(positions: torch.Tensor, head_dim: int, partial_rotary_factor: float, elem_size: int) -> int:
+    # Lower-bound: one read of cos/sin per token * rotary_dim (shared across heads/batch via broadcast)
+    # If positions is [B, T] or [T], we count total positions used this step.
+    if positions.dim() == 0:
+        t = int(positions.item())  # rare case
+        used = max(1, t)
+    else:
+        used = int(positions.numel())
+    rotary_dim = int(head_dim * partial_rotary_factor)
+    return used * rotary_dim * elem_size
+
+def _ntok(x: torch.Tensor, hidden_size: int) -> int:
+    # total tokens across batch*seq (assumes last dim = hidden_size)
+    return x.numel() // hidden_size

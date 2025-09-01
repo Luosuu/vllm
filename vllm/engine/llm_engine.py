@@ -63,6 +63,8 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
+import triton.profiler as proton
+logger.info("LLMProf: Initializing automatic profile rotation in V0 engine")
 
 @dataclass
 class SchedulerOutputState:
@@ -293,6 +295,18 @@ class LLMEngine:
                     "disable_custom_all_reduce":
                     self.parallel_config.disable_custom_all_reduce,
                 })
+        
+        ## Proton
+        self.proton_completed_requests = 0
+        self.proton_session_id = None
+        self.proton_current_session_dir = None
+        self.proton_profile_interval = (
+            envs.VLLM_LLMPROF_PROFILE_REQUESTS_INTERVAL)
+        from pathlib import Path
+        self.proton_profile_dir = Path(envs.VLLM_LLMPROF_PROFILE_DIR)
+        logger.info("LLMProf: Profile interval=%d, dir=%s", 
+                    self.proton_profile_interval, self.proton_profile_dir)
+        self._start_new_proton_session()
 
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
@@ -1166,10 +1180,11 @@ class LLMEngine:
         if not self._has_remaining_steps(
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
-            # Schedule iteration
-            (seq_group_metadata_list, scheduler_outputs,
-             allow_async_output_proc
-             ) = self.scheduler[virtual_engine].schedule()
+            with proton.cpu_timed_scope("llm_engine_schedule"):
+                # Schedule iteration
+                (seq_group_metadata_list, scheduler_outputs,
+                allow_async_output_proc
+                ) = self.scheduler[virtual_engine].schedule()
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1181,6 +1196,10 @@ class LLMEngine:
             for finished_request_id in finished_requests_ids:
                 if finished_request_id in self.seq_id_to_seq_group:
                     del self.seq_id_to_seq_group[finished_request_id]
+            
+            if finished_requests_ids:
+                self._finalize_proton_session_if_needed(
+                    len(finished_requests_ids))
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -1218,8 +1237,9 @@ class LLMEngine:
                     virtual_engine]
 
             try:
-                outputs = self.model_executor.execute_model(
-                    execute_model_req=execute_model_req)
+                with proton.cpu_timed_scope("llm_engine_model_execution"):
+                    outputs = self.model_executor.execute_model(
+                        execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1888,6 +1908,76 @@ class LLMEngine:
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
+
+    def _start_new_proton_session(self) -> None:
+        """Start a new Proton profiling session with timestamp-based naming."""
+        import os
+        timestamp = int(time.time())
+        model_name = self.model_config.model.replace("/", "--")
+        session_name = f"llm_engine_{model_name}_{timestamp}"
+
+        # Create profile directory structure
+        profile_session_dir = (self.proton_profile_dir / 
+                              model_name / 
+                              f"session_{timestamp}")
+        profile_session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Store the session directory for later use
+        self.proton_current_session_dir = profile_session_dir
+
+        # Change to profile directory for output
+        original_cwd = os.getcwd()
+        os.chdir(str(profile_session_dir))
+
+        try:
+            self.proton_session_id = proton.start(session_name)
+            proton.activate(self.proton_session_id)
+            logger.info("Started Proton session: %s in %s", 
+                       session_name, profile_session_dir)
+        except Exception as e:
+            logger.warning("Failed to start Proton session: %s", e)
+            self.proton_session_id = None
+        finally:
+            os.chdir(original_cwd)
+
+    def _finalize_proton_session_if_needed(self, 
+                                          num_finished_requests: int) -> None:
+        """
+        Finalize current Proton session and start new one if we've hit 
+        the request threshold.
+        """
+
+        self.proton_completed_requests += num_finished_requests
+        logger.info("LLMProf: Completed requests: %d/%d", 
+                   self.proton_completed_requests, self.proton_profile_interval)
+
+        if (self.proton_completed_requests >= 
+            self.proton_profile_interval):
+            try:
+                # Change to session directory and finalize
+                import os
+                original_cwd = os.getcwd()
+                try:
+                    if self.proton_current_session_dir:
+                        os.chdir(str(self.proton_current_session_dir))
+
+                        # Finalize current session (saves profile)
+                        proton.finalize(self.proton_session_id)
+                        logger.info("Finalized Proton session after %d requests in %s",
+                                   self.proton_completed_requests, self.proton_current_session_dir)
+                    else:
+                        logger.warning("No current session directory for finalization")
+
+                finally:
+                    os.chdir(original_cwd)
+
+                # Reset counter and start new session
+                self.proton_completed_requests = 0
+                self._start_new_proton_session()
+
+            except Exception as e:
+                logger.warning("Failed to finalize Proton session: %s", e)
+                self.proton_session_id = None
 
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:

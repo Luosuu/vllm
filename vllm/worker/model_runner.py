@@ -59,6 +59,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
+import triton.profiler as proton
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -1696,20 +1698,32 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
-                hidden_or_intermediate_states = model_executable(
-                    input_ids=model_input.input_tokens,
-                    inputs_embeds=model_input.inputs_embeds,
-                    positions=model_input.input_positions,
-                    intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(
-                        multi_modal_kwargs,
-                        device=self.device,
-                    ),
-                    **seqlen_agnostic_kwargs,
-                    **model_kwargs,
-                )
+            is_prefill = prefill_meta is not None
+            is_decode_with_cuda_graph = (prefill_meta is None and 
+                                        decode_meta.use_cuda_graph if decode_meta else False)
+
+            if is_prefill:
+                scope_name = "model_runner_prefill_execution"
+            elif is_decode_with_cuda_graph:
+                scope_name = "model_runner_decode_cuda_graph_execution"
+            else:
+                scope_name = "model_runner_decode_execution"
+
+            with proton.cpu_timed_scope(scope_name):  # noqa: SIM117
+                with set_forward_context(model_input.attn_metadata,
+                                        self.vllm_config, virtual_engine):
+                    hidden_or_intermediate_states = model_executable(
+                        input_ids=model_input.input_tokens,
+                        inputs_embeds=model_input.inputs_embeds,
+                        positions=model_input.input_positions,
+                        intermediate_tensors=intermediate_tensors,
+                        **MultiModalKwargs.as_kwargs(
+                            multi_modal_kwargs,
+                            device=self.device,
+                        ),
+                        **seqlen_agnostic_kwargs,
+                        **model_kwargs,
+                    )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
