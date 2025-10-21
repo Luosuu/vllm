@@ -5,12 +5,14 @@
 import copy
 import gc
 import os
+import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed
 import torch.nn as nn
+import triton.profiler as proton
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -75,9 +77,39 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
+        # Profiler configuration
+        self._proton_name = None
+        self._proton_name_prefix = None
+        self._proton_context = None
+        self._proton_data = None
+        self._proton_backend = None
+        self._proton_mode = None
+        self._proton_hook = None
+
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        self.profiler = None
+        self.profiler_type: str | None = None
+        self._proton_active = False
+
+        if envs.USE_PROTON:
+            self.profiler_type = "proton"
+
+            def _normalize(value: str | None) -> str | None:
+                if value is None:
+                    return None
+                value = value.strip()
+                return value or None
+
+            self._proton_name = _normalize(envs.PROTON_PROFILE_NAME)
+            self._proton_name_prefix = _normalize(envs.PROTON_PROFILE_NAME_PREFIX)
+            self._proton_context = _normalize(envs.PROTON_PROFILE_CONTEXT)
+            self._proton_data = _normalize(envs.PROTON_PROFILE_DATA)
+            self._proton_backend = _normalize(envs.PROTON_PROFILE_BACKEND)
+            self._proton_mode = _normalize(envs.PROTON_PROFILE_MODE)
+            self._proton_hook = _normalize(envs.PROTON_PROFILE_HOOK)
+            logger.info("Proton profiler enabled.")
+        elif envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             logger.info(
@@ -105,6 +137,7 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
+            self.profiler_type = "torch"
         else:
             self.profiler = None
 
@@ -508,17 +541,44 @@ class Worker(WorkerBase):
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
-        if self.profiler is None:
+        if self.profiler_type is None:
             raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
+
+        if self.profiler_type == "torch":
+            if is_start:
+                self.profiler.start()
+            else:
+                self.profiler.stop()
+                # only print profiler results on rank 0
+                if self.local_rank == 0:
+                    print(
+                        self.profiler.key_averages().table(
+                            sort_by="self_cuda_time_total"
+                        )
+                    )
+        elif self.profiler_type == "proton":
+            if is_start:
+                if not self._proton_active:
+                    prefix = self._proton_name_prefix or "proton_profile"
+                    timestamp = int(time.time() * 1_000_000)
+                    name = self._proton_name or f"{prefix}_{os.getpid()}_{timestamp}"
+                    logger.info("Starting Proton profiler with name: %s", name)
+                    proton.start(
+                        name=name,
+                        context=self._proton_context,
+                        data=self._proton_data,
+                        backend=self._proton_backend,
+                        mode=self._proton_mode,
+                        hook=self._proton_hook,
+                    )
+                    self._proton_active = True
+            else:
+                if self._proton_active:
+                    logger.info("Finalizing Proton profiler...")
+                    proton.finalize()
+                    self._proton_active = False
         else:
-            self.profiler.stop()
-            # only print profiler results on rank 0
-            if self.local_rank == 0:
-                print(
-                    self.profiler.key_averages().table(sort_by="self_cuda_time_total")
-                )
+            raise RuntimeError(f"Unknown profiler type {self.profiler_type}")
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
