@@ -12,5 +12,5 @@ vllm bench serve \
   --ignore-eos \
   --max-concurrency 128 \
   --num-prompt 128 \
-  --save-result --result-filename vllm_benchmark_serving_results_dp_ep.json
-  # --profile \
+  --save-result --result-filename vllm_benchmark_serving_results_dp_ep.json \
+  --profile

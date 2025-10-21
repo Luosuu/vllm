@@ -4,6 +4,7 @@
     . .venv/bin/activate
     export NCCL_DEBUG=WARN
     # export VLLM_TORCH_PROFILER_DIR=./vllm_profile_torch
+    export USE_PROTON=1
     export model_dir=${model_dir:-/mnt/local/localcache00/gpt-oss-120b}
     export YAML_CONFIG="GPT-OSS_Blackwell.yaml"
     export VLLM_ALL2ALL_BACKEND=deepep_high_throughput
