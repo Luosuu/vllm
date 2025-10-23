@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Optional
 
 import torch
+import triton.profiler as proton
 from torch.nn.parameter import Parameter
 
 from vllm import envs
@@ -824,25 +825,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
-
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-        )
+        
+        with proton.cpu_timed_scope("Mxfp4MoEMethod-FusedMoE.select_experts"):
+            topk_weights, topk_ids, _ = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype,
+                enable_eplb=enable_eplb,
+                expert_map=expert_map,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
         w13_weight = (
             self.w13_weight_triton_tensor
@@ -1094,18 +1096,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
             )
-
-            return triton_kernel_moe_forward(
-                hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            with proton.cpu_timed_scope("triton_kernel_moe_forward"):
+                return triton_kernel_moe_forward(
+                    hidden_states=x,
+                    w1=self.w13_weight_triton_tensor,
+                    w2=self.w2_weight_triton_tensor,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    quant_config=self.moe_quant_config,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
