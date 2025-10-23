@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import deep_ep
 import torch
-
+import triton.profiler as proton
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -339,16 +339,17 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
-        combined_x, _, event = self.buffer.combine(
-            # HT combine only supports BF16
-            x=fused_expert_output,
-            handle=handle,
-            topk_weights=None,
-            config=self._get_combine_config(),
-            previous_event=None,
-            async_finish=do_async and not dbo_enabled(),
-            allocate_on_comm_stream=False,
-        )
+        with proton.cpu_timed_scope("deepep_ht_combine"):
+            combined_x, _, event = self.buffer.combine(
+                # HT combine only supports BF16
+                x=fused_expert_output,
+                handle=handle,
+                topk_weights=None,
+                config=self._get_combine_config(),
+                previous_event=None,
+                async_finish=do_async and not dbo_enabled(),
+                allocate_on_comm_stream=False,
+            )
 
         dbo_switch_to_compute()
 
