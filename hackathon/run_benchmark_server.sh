@@ -3,8 +3,12 @@
     set -x
     . .venv/bin/activate
     export NCCL_DEBUG=WARN
+    # torch profiler trigger
     # export VLLM_TORCH_PROFILER_DIR=./vllm_profile_torch
+    # proton profiler trigger
     export USE_PROTON=1
+    export PROTON_PROFILE_CONTEXT=shadow
+    export PROTON_PROFILE_NAME_PREFIX=proton_profile
     export model_dir=${model_dir:-/mnt/local/localcache00/gpt-oss-120b}
     export YAML_CONFIG="GPT-OSS_Blackwell.yaml"
     export VLLM_ALL2ALL_BACKEND=deepep_high_throughput
