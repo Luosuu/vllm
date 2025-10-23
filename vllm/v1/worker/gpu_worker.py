@@ -563,14 +563,18 @@ class Worker(WorkerBase):
                     timestamp = int(time.time() * 1_000_000)
                     name = self._proton_name or f"{prefix}_{os.getpid()}_{timestamp}"
                     logger.info("Starting Proton profiler with name: %s", name)
-                    proton.start(
-                        name=name,
-                        context=self._proton_context,
-                        data=self._proton_data,
-                        backend=self._proton_backend,
-                        mode=self._proton_mode,
-                        hook=self._proton_hook,
-                    )
+                    kwargs: dict[str, str] = {}
+                    if self._proton_context is not None:
+                        kwargs["context"] = self._proton_context
+                    if self._proton_data is not None:
+                        kwargs["data"] = self._proton_data
+                    if self._proton_backend is not None:
+                        kwargs["backend"] = self._proton_backend
+                    if self._proton_mode is not None:
+                        kwargs["mode"] = self._proton_mode
+                    if self._proton_hook is not None:
+                        kwargs["hook"] = self._proton_hook
+                    proton.start(name=name, **kwargs)
                     self._proton_active = True
             else:
                 if self._proton_active:
