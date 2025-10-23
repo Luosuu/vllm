@@ -262,7 +262,7 @@ class TPUWorker:
         # every worker's output is needed when kv_transfer_group is set up
         return output if self.is_driver_worker or has_kv_transfer_group() else None
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_options: dict[str, Any] | None = None):
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")

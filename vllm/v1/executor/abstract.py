@@ -121,8 +121,9 @@ class Executor(ExecutorBase):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(self, is_start: bool = True, profile_options: dict[str, Any] | None = None):
+        kwargs = None if profile_options is None else {"profile_options": profile_options}
+        self.collective_rpc("profile", args=(is_start,), kwargs=kwargs)
 
 
 class UniProcExecutor(UniProcExecutorV0, Executor):

@@ -46,6 +46,16 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
+
+def _normalize_proton_option(value: Any) -> str | None:
+    """Normalize Proton profiler options from env or overrides."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    return value or None
+
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -78,36 +88,32 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # Profiler configuration
-        self._proton_name = None
-        self._proton_name_prefix = None
-        self._proton_context = None
-        self._proton_data = None
-        self._proton_backend = None
-        self._proton_mode = None
-        self._proton_hook = None
-
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         self.profiler = None
         self.profiler_type: str | None = None
         self._proton_active = False
+        self._proton_base_config: dict[str, str | None] | None = None
+        self._proton_active_config: dict[str, str | None] | None = None
 
         if envs.USE_PROTON:
+            import importlib
+
+            try:
+                importlib.import_module("triton.profiler")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "USE_PROTON is set but Triton Proton profiler is unavailable."
+                ) from exc
+
             self.profiler_type = "proton"
-
-            def _normalize(value: str | None) -> str | None:
-                if value is None:
-                    return None
-                value = value.strip()
-                return value or None
-
-            self._proton_name = _normalize(envs.PROTON_PROFILE_NAME)
-            self._proton_name_prefix = _normalize(envs.PROTON_PROFILE_NAME_PREFIX)
-            self._proton_context = _normalize(envs.PROTON_PROFILE_CONTEXT)
-            self._proton_data = _normalize(envs.PROTON_PROFILE_DATA)
-            self._proton_backend = _normalize(envs.PROTON_PROFILE_BACKEND)
-            self._proton_mode = _normalize(envs.PROTON_PROFILE_MODE)
-            self._proton_hook = _normalize(envs.PROTON_PROFILE_HOOK)
+            self._proton_base_config = {
+                "name": _normalize_proton_option(envs.PROTON_PROFILE_NAME),
+                "name_prefix": _normalize_proton_option(envs.PROTON_PROFILE_NAME_PREFIX),
+                "context": _normalize_proton_option(envs.PROTON_PROFILE_CONTEXT),
+                "data": _normalize_proton_option(envs.PROTON_PROFILE_DATA),
+                "backend": _normalize_proton_option(envs.PROTON_PROFILE_BACKEND),
+                "mode": _normalize_proton_option(envs.PROTON_PROFILE_MODE),
+                "hook": _normalize_proton_option(envs.PROTON_PROFILE_HOOK),
+            }
             logger.info("Proton profiler enabled.")
         elif envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
@@ -540,7 +546,7 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True):
+    def profile(self, is_start: bool = True, profile_options: dict[str, Any] | None = None):
         if self.profiler_type is None:
             raise RuntimeError("Profiler is not enabled.")
 
@@ -559,28 +565,37 @@ class Worker(WorkerBase):
         elif self.profiler_type == "proton":
             if is_start:
                 if not self._proton_active:
-                    prefix = self._proton_name_prefix or "proton_profile"
+                    import triton.profiler as proton
+
+                    config = dict(self._proton_base_config or {})
+                    if profile_options:
+                        for key in ("name", "name_prefix", "context", "data", "backend", "mode", "hook"):
+                            if key in profile_options:
+                                config[key] = _normalize_proton_option(profile_options[key])
+
+                    name_prefix = config.get("name_prefix") or "proton_profile"
                     timestamp = int(time.time() * 1_000_000)
-                    name = self._proton_name or f"{prefix}_{os.getpid()}_{timestamp}"
-                    logger.info("Starting Proton profiler with name: %s", name)
-                    kwargs: dict[str, str] = {}
-                    if self._proton_context is not None:
-                        kwargs["context"] = self._proton_context
-                    if self._proton_data is not None:
-                        kwargs["data"] = self._proton_data
-                    if self._proton_backend is not None:
-                        kwargs["backend"] = self._proton_backend
-                    if self._proton_mode is not None:
-                        kwargs["mode"] = self._proton_mode
-                    if self._proton_hook is not None:
-                        kwargs["hook"] = self._proton_hook
-                    proton.start(name=name, **kwargs)
+                    final_name = config.get("name") or f"{name_prefix}_{os.getpid()}_{timestamp}"
+                    kwargs = {}
+                    for key in ("context", "data", "backend", "mode", "hook"):
+                        value = config.get(key)
+                        if value is not None:
+                            kwargs[key] = value
+
+                    logger.info("Starting Proton profiler with name: %s", final_name)
+                    if kwargs:
+                        logger.debug("Proton profiler options: %s", kwargs)
+                    proton.start(name=final_name, **kwargs)
                     self._proton_active = True
+                    self._proton_active_config = config
             else:
                 if self._proton_active:
                     logger.info("Finalizing Proton profiler...")
+                    import triton.profiler as proton
+
                     proton.finalize()
                     self._proton_active = False
+                    self._proton_active_config = None
         else:
             raise RuntimeError(f"Unknown profiler type {self.profiler_type}")
 
