@@ -1198,7 +1198,17 @@ if envs.VLLM_TORCH_PROFILER_DIR or envs.USE_PROTON:
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
         logger.info("Starting profiler...")
-        await engine_client(raw_request).start_profile()
+        profile_options = None
+        try:
+            payload = await raw_request.json()
+        except json.JSONDecodeError:
+            payload = None
+        except Exception:
+            payload = None
+        else:
+            if isinstance(payload, dict):
+                profile_options = payload
+        await engine_client(raw_request).start_profile(profile_options=profile_options)
         logger.info("Profiler started.")
         return Response(status_code=200)
 
