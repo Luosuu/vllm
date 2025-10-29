@@ -12,6 +12,6 @@ vllm bench serve \
   --random-input-len 1000 \
   --random-output-len 1000 \
   --ignore-eos \
-  --num-prompt 512 \
+  --num-prompt 2048 \
   --save-result --result-filename vllm_benchmark_serving_results_120b_dpep8_triton_kernels_deepep.json \
   --profile
