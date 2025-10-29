@@ -340,7 +340,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
         combine_scope = proton.cpu_timed_scope("deepep_ht_combine")
-        combine_scope.__enter__()
+        combine_scope._enter_scope()
         combined_x, _, event = self.buffer.combine(
             # HT combine only supports BF16
             x=fused_expert_output,
@@ -351,7 +351,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
-        combine_scope.__exit__()
+        combine_scope._exit_scope()
 
         dbo_switch_to_compute()
 

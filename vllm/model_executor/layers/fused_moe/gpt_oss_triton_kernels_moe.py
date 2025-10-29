@@ -141,14 +141,14 @@ def triton_kernel_fused_experts(
         global_num_experts = E
         
     fused_act_scope = proton.cpu_timed_scope("FusedActivation-swiglu")
-    fused_act_scope.__enter__()
+    fused_act_scope._enter_scope()
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
         (swiglu_alpha, swiglu_limit),
         2,
     )
-    fused_act_scope.__exit__()
+    fused_act_scope._exit_scope()
     
     gammas = routing_data.gate_scal if routing_data else None
     tokens_involved = int(routing_data.expt_hist.sum().item()) if routing_data else 0
@@ -167,7 +167,7 @@ def triton_kernel_fused_experts(
             "bytes": num_bytes(w1) + token_num_bytes
             }
         )
-    matmul_ogs_w1_scope.__enter__()
+    matmul_ogs_w1_scope._enter_scope()
 
     intermediate_cache1 = matmul_ogs(
         hidden_states,
@@ -179,7 +179,7 @@ def triton_kernel_fused_experts(
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
     )
-    matmul_ogs_w1_scope.__exit__()
+    matmul_ogs_w1_scope._exit_scope()
 
     matmul_ogs_w2_scope = proton.cpu_timed_scope(
         name="matmul_ogs-w2",
@@ -188,7 +188,7 @@ def triton_kernel_fused_experts(
             "bytes": num_bytes(w1) + token_num_bytes
             }
         )
-    matmul_ogs_w2_scope.__enter__()
+    matmul_ogs_w2_scope._enter_scope()
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
         w2,
@@ -199,7 +199,7 @@ def triton_kernel_fused_experts(
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
-    matmul_ogs_w2_scope.__exit__()
+    matmul_ogs_w2_scope._exit_scope()
     return intermediate_cache3
 
 
@@ -327,15 +327,15 @@ class OAITritonExperts(BaseOAITritonExperts):
             global_num_experts = local_num_experts
         
         mk_routing_data_scope = proton.cpu_timed_scope("OAITritonExperts-make_routing_data")
-        mk_routing_data_scope.__enter__()
+        mk_routing_data_scope._enter_scope()
         routing_data, gather_indx, scatter_indx = self._make_routing_data(
                 topk_ids, topk_weights, local_num_experts
         )
-        mk_routing_data_scope.__exit__()
+        mk_routing_data_scope._exit_scope()
         
         
         triton_fused_experts_scope =  proton.cpu_timed_scope("OAITritonExperts-triton_kernel_fused_experts")
-        triton_fused_experts_scope.__enter__()
+        triton_fused_experts_scope._enter_scope()
         experts_output = triton_kernel_fused_experts(
             None,
             hidden_states,
@@ -351,6 +351,6 @@ class OAITritonExperts(BaseOAITritonExperts):
             expert_map=None,  # applied already
             a1q_scale=a1q_scale,
         )
-        triton_fused_experts_scope.__exit__()
+        triton_fused_experts_scope._exit_scope()
 
         output.copy_(experts_output, non_blocking=True)

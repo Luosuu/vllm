@@ -829,7 +829,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
         
         select_expt_scope = proton.cpu_timed_scope("Mxfp4MoEMethod-FusedMoE.select_experts")
-        select_expt_scope.__enter__()
+        select_expt_scope._enter_scope()
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -848,7 +848,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
         )
-        select_expt_scope.__exit_()
+        select_expt_scope._exit_scope()
 
         w13_weight = (
             self.w13_weight_triton_tensor
@@ -1101,7 +1101,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 triton_kernel_moe_forward,
             )
             triton_kernel_moe_forward_scope = proton.cpu_timed_scope("triton_kernel_moe_forward")
-            triton_kernel_moe_forward_scope.__enter__()
+            triton_kernel_moe_forward_scope._enter_scope()
             out = triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
@@ -1114,7 +1114,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
-            triton_kernel_moe_forward_scope.__exit__()
+            triton_kernel_moe_forward_scope._exit_scope()
             return out
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
