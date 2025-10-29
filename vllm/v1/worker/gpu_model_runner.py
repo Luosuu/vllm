@@ -2395,14 +2395,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             Model output tensor
         """
-        with proton.cpu_timed_scope("_model_forward"):
-            return self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+        forward_scope = proton.cpu_timed_scope("_model_forward")
+        forward_scope.__enter__()
+        result = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
+        forward_scope.__exit__()
+        return result
 
     @torch.inference_mode()
     def execute_model(

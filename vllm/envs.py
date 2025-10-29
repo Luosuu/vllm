@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
+    VLLM_USE_TRITON_MOE: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -492,6 +493,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN": lambda: (
         os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1")
+    ),
+    # Flag to control if vLLM should force the Triton MoE backend.
+    "VLLM_USE_TRITON_MOE": lambda: (
+        os.environ.get("VLLM_USE_TRITON_MOE", "True").lower() in ("true", "1")
     ),
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.
@@ -1513,6 +1518,7 @@ def compute_hash() -> str:
         "VLLM_MLA_DISABLE",
         "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
         "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_USE_TRITON_MOE",
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",

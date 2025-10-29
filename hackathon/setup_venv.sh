@@ -23,7 +23,7 @@
     cd triton
     git checkout release/3.5.x
     cd ../
-    uv pip install triton/python/triton_kernels --no-deps 
+    uv pip install -e triton/python/triton_kernels --no-deps 
 
     # install deep_ep
     cd tools/ep_kernels/

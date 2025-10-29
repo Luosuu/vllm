@@ -339,17 +339,19 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert fused_expert_output.dtype == torch.bfloat16, (
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
-        with proton.cpu_timed_scope("deepep_ht_combine"):
-            combined_x, _, event = self.buffer.combine(
-                # HT combine only supports BF16
-                x=fused_expert_output,
-                handle=handle,
-                topk_weights=None,
-                config=self._get_combine_config(),
-                previous_event=None,
-                async_finish=do_async and not dbo_enabled(),
-                allocate_on_comm_stream=False,
-            )
+        combine_scope = proton.cpu_timed_scope("deepep_ht_combine")
+        combine_scope.__enter__()
+        combined_x, _, event = self.buffer.combine(
+            # HT combine only supports BF16
+            x=fused_expert_output,
+            handle=handle,
+            topk_weights=None,
+            config=self._get_combine_config(),
+            previous_event=None,
+            async_finish=do_async and not dbo_enabled(),
+            allocate_on_comm_stream=False,
+        )
+        combine_scope.__exit__()
 
         dbo_switch_to_compute()
 
