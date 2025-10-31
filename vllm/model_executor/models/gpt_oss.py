@@ -128,16 +128,26 @@ class OAIAttention(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
-        with proton.cpu_timed_scope("OAIAttention-qkv_transformation"):
-            qkv, _ = self.qkv(hidden_states)
-        with proton.cpu_timed_scope("OAIAttention-qkv.split"):
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qkv_transform_scope = proton.cpu_timed_scope("OAIAttention-qkv_transformation")
+        qkv_transform_scope._enter_scope()
+        qkv, _ = self.qkv(hidden_states)
+        qkv_transform_scope._exit_scope()
+
+        qkv_split_scope = proton.cpu_timed_scope("OAIAttention-qkv.split")
+        qkv_split_scope._enter_scope()
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qkv_split_scope._exit_scope()
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
-        with proton.cpu_timed_scope("OAIAttention-attention"):
-            attn_output = self.attn(q, k, v)
-        with proton.cpu_timed_scope("OAIAttention-o_project"):
-            output, _ = self.o_proj(attn_output)
+        attention_scope = proton.cpu_timed_scope("OAIAttention-attention")
+        attention_scope._enter_scope()
+        attn_output = self.attn(q, k, v)
+        attention_scope._exit_scope()
+
+        o_proj_scope = proton.cpu_timed_scope("OAIAttention-o_project")
+        o_proj_scope._enter_scope()
+        output, _ = self.o_proj(attn_output)
+        o_proj_scope._exit_scope()
         return output
 
 
@@ -181,10 +191,15 @@ class MLPBlock(torch.nn.Module):
         num_tokens = x.shape[0]
         if self.is_sequence_parallel:
             x = sequence_parallel_chunk(x)
-        with proton.cpu_timed_scope("MLPBlock-router"):
-            g = self.router(x)
-        with proton.cpu_timed_scope("MLPBlock-experts_FusedMoE"):
-            x = self.experts(hidden_states=x, router_logits=g)
+        router_scope = proton.cpu_timed_scope("MLPBlock-router")
+        router_scope._enter_scope()
+        g = self.router(x)
+        router_scope._exit_scope()
+
+        experts_scope = proton.cpu_timed_scope("MLPBlock-experts_FusedMoE")
+        experts_scope._enter_scope()
+        x = self.experts(hidden_states=x, router_logits=g)
+        experts_scope._exit_scope()
 
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)

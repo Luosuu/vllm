@@ -80,7 +80,9 @@ class Mxfp4Backend(Enum):
 def get_mxfp4_backend():
     # Backend Selection
     if current_platform.is_cuda():
-        return Mxfp4Backend.TRITON
+        if envs.VLLM_USE_TRITON_MOE:
+            logger.info_once("Using triton_kernels matmul_ogs backend")
+            return Mxfp4Backend.TRITON
         if (
             current_platform.is_device_capability(90)
             and has_flashinfer()
@@ -1126,21 +1128,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
             )
-            
-            with proton.cpu_timed_scope("triton_kernel_moe_forward"):
-                return triton_kernel_moe_forward(
-                    hidden_states=x,
-                    w1=self.w13_weight_triton_tensor,
-                    w2=self.w2_weight_triton_tensor,
-                    gating_output=router_logits,
-                    topk=top_k,
-                    renormalize=renormalize,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    expt_assignment = self.expt_assignment,
-                    symm_mem_pool = self.symm_mem_pool,
-                    quant_config=self.moe_quant_config,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
+            triton_kernel_scope = proton.cpu_timed_scope("triton_kernel_moe_forward")
+            triton_kernel_scope._enter_scope()
+            result = triton_kernel_moe_forward(
+                hidden_states=x,
+                w1=self.w13_weight_triton_tensor,
+                w2=self.w2_weight_triton_tensor,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                expt_assignment=self.expt_assignment,
+                symm_mem_pool=self.symm_mem_pool,
+                quant_config=self.moe_quant_config,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            triton_kernel_scope._exit_scope()
+            return result
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
