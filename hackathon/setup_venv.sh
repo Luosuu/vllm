@@ -6,17 +6,19 @@
 (
     set -x  # enable command tracing inside subshell
     # build vllm from source using torch2.9 
-    # create .venv first by `uv venv`
-    # uv pip install torch==2.9 
-    # uv pip install torchaudio
+    # create .venv first by `uv venv --python 3.12`
+    uv pip install torch==2.9 
+    uv pip install torchaudio
     uv pip install torchvision 
     . .venv/bin/activate
-    python use_existing_torch.py
-
-    uv pip install -r requirements/common.txt 
-    uv pip install -r requirements/cuda.txt 
-    uv pip install -r requirements/build.txt 
-    uv pip install -vvv  -e .  --no-build-isolation 
+    uv pip install setuptools_scm
+    VLLM_USE_PRECOMPILED=1 uv pip install -e . -v --no-build-isolation --prerelease=allow
+    # when use custom torch
+    # python use_existing_torch.py
+    # uv pip install -r requirements/common.txt 
+    # uv pip install -r requirements/cuda.txt 
+    # uv pip install -r requirements/build.txt 
+    # uv pip install -vvv  -e .  --no-build-isolation 
 
     # Installed triton_kernels like,
     git clone https://github.com/triton-lang/triton.git 

@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -159,6 +160,32 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _ModelForwardPhase:
+    prefill_tokens: int
+    decode_tokens: int
+
+    @property
+    def scope_name(self) -> str:
+        if self.prefill_tokens and self.decode_tokens:
+            return (
+                f"_model_forward_pf{self.prefill_tokens}_dec{self.decode_tokens}"
+            )
+        if self.prefill_tokens:
+            return "_model_forward_prefill"
+        if self.decode_tokens:
+            return "_model_forward_decode"
+        return "_model_forward"
+
+    @property
+    def metrics(self) -> dict[str, int]:
+        return {
+            "prefill_tokens": self.prefill_tokens,
+            "decode_tokens": self.decode_tokens,
+        }
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -2371,12 +2398,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         finally:
             self.prepare_inputs_event.record()
 
+    def _compute_model_forward_phase(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> _ModelForwardPhase:
+        prefill_tokens = 0
+        decode_tokens = 0
+
+        for req_id, num_scheduled in scheduler_output.num_scheduled_tokens.items():
+            if num_scheduled <= 0:
+                continue
+
+            req_index = self.input_batch.req_id_to_index[req_id]
+            prompt_total = int(self.input_batch.num_prompt_tokens[req_index])
+            computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+
+            prefill_before = min(computed, prompt_total)
+            prefill_after = min(computed + num_scheduled, prompt_total)
+            prefill_this_step = prefill_after - prefill_before
+            decode_this_step = num_scheduled - prefill_this_step
+
+            prefill_tokens += prefill_this_step
+            decode_tokens += decode_this_step
+
+        return _ModelForwardPhase(prefill_tokens=prefill_tokens, decode_tokens=decode_tokens)
+
     def _model_forward(
         self,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        phase_scope: _ModelForwardPhase | None = None,
         **model_kwargs: dict[str, Any],
     ) -> Any:
         """Helper method to call the model forward pass.
@@ -2395,7 +2447,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             Model output tensor
         """
-        forward_scope = proton.cpu_timed_scope("_model_forward")
+        scope_name = "_model_forward"
+        metrics: dict[str, int] | None = None
+        if phase_scope is not None:
+            scope_name = phase_scope.scope_name
+            metrics = phase_scope.metrics
+
+        if metrics is not None:
+            forward_scope = proton.cpu_timed_scope(scope_name, metrics=metrics)
+        else:
+            forward_scope = proton.cpu_timed_scope(scope_name)
         forward_scope._enter_scope()
         result = self.model(
             input_ids=input_ids,
@@ -2505,11 +2566,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             record_function_or_nullcontext("Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            phase_scope = self._compute_model_forward_phase(scheduler_output)
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                phase_scope=phase_scope,
                 **model_kwargs,
             )
 
