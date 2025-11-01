@@ -1110,6 +1110,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
 
             output = torch.empty_like(x, dtype=torch.bfloat16)
+            flashinfer_scope = proton.cpu_timed_scope("flashinfer_cutlass_fused_moe")
+            flashinfer_scope._enter_scope()
             _ = flashinfer_cutlass_fused_moe(
                 input=fi_input,
                 token_selected_experts=topk_ids.to(torch.int).contiguous(),
@@ -1129,6 +1131,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 tune_max_num_tokens=max(self.max_capture_size, 1),
                 **extra_kwargs,
             )
+            flashinfer_scope._exit_scope()
 
             return output
         elif self.mxfp4_backend == Mxfp4Backend.TRITON:

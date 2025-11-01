@@ -87,8 +87,17 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_TORCH_PROFILER_DIR: str | None = None
+    USE_PROTON: bool = False
+    PROTON_PROFILE_NAME: str | None = None
+    PROTON_PROFILE_NAME_PREFIX: str | None = None
+    PROTON_PROFILE_CONTEXT: str | None = None
+    PROTON_PROFILE_DATA: str | None = None
+    PROTON_PROFILE_BACKEND: str | None = None
+    PROTON_PROFILE_MODE: str | None = None
+    PROTON_PROFILE_HOOK: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_USE_TRITON_MOE: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
@@ -804,6 +813,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
     ),
+    "USE_PROTON": lambda: bool(
+        os.getenv("USE_PROTON", "0").strip().lower() not in ("0", "false")
+    ),
+    "PROTON_PROFILE_NAME": lambda: os.getenv("PROTON_PROFILE_NAME"),
+    "PROTON_PROFILE_NAME_PREFIX": lambda: os.getenv("PROTON_PROFILE_NAME_PREFIX"),
+    "PROTON_PROFILE_CONTEXT": lambda: os.getenv("PROTON_PROFILE_CONTEXT"),
+    "PROTON_PROFILE_DATA": lambda: os.getenv("PROTON_PROFILE_DATA"),
+    "PROTON_PROFILE_BACKEND": lambda: os.getenv("PROTON_PROFILE_BACKEND"),
+    "PROTON_PROFILE_MODE": lambda: os.getenv("PROTON_PROFILE_MODE"),
+    "PROTON_PROFILE_HOOK": lambda: os.getenv("PROTON_PROFILE_HOOK"),
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
     # traces (CPU & GPU) will be saved under this directory.
@@ -838,6 +857,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # not profile flops.
     "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
         os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
+    ),
+    "VLLM_USE_TRITON_MOE": lambda: (
+        os.environ.get("VLLM_USE_TRITON_MOE", "True").lower() in ("true", "1")
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
