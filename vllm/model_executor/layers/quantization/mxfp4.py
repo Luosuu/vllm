@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Optional
 
 import torch
+import triton.profiler as proton
 from torch.nn.parameter import Parameter
 
 from vllm import envs
@@ -92,6 +93,9 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
         return get_mxfp4_backend_with_lora()
 
     if current_platform.is_cuda():
+        if envs.VLLM_USE_TRITON_MOE:
+            logger.info_once("Using triton_kernels matmul_ogs backend")
+            return Mxfp4Backend.TRITON
         if (
             current_platform.is_device_capability(90)
             and has_flashinfer()
@@ -1132,7 +1136,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 triton_kernel_moe_forward,
             )
 
-            return triton_kernel_moe_forward(
+            triton_kernel_scope = proton.cpu_timed_scope("triton_kernel_moe_forward")
+            triton_kernel_scope._enter_scope()
+            out = triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
                 w2=self.w2_weight_triton_tensor,
@@ -1144,5 +1150,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+            triton_kernel_scope._exit_scope()
+            return out
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
