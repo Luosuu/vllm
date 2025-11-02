@@ -168,9 +168,9 @@ class _ModelForwardPhase:
                 f"_model_forward_pf{self.prefill_tokens}_dec{self.decode_tokens}"
             )
         if self.prefill_tokens:
-            return "_model_forward_prefill"
+            return f"_model_forward_prefill_{self.prefill_tokens}"
         if self.decode_tokens:
-            return "_model_forward_decode"
+            return f"_model_forward_decode_{self.decode_tokens}"
         return "_model_forward"
 
     @property

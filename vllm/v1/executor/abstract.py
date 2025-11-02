@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -220,8 +220,11 @@ class Executor(ABC):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(
+        self, is_start: bool = True, profile_options: dict[str, Any] | None = None
+    ):
+        kwargs = None if profile_options is None else {"profile_options": profile_options}
+        self.collective_rpc("profile", args=(is_start,), kwargs=kwargs)
 
     def save_sharded_state(
         self,
@@ -278,8 +281,9 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
-    def start_profile(self) -> None:
-        self.collective_rpc("start_profile")
+    def start_profile(self, profile_options: dict[str, Any] | None = None) -> None:
+        kwargs = None if profile_options is None else {"profile_options": profile_options}
+        self.collective_rpc("start_profile", kwargs=kwargs)
 
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
