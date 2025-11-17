@@ -94,6 +94,12 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._proton_forward_token_annotation_default = (
+            envs.PROTON_PROFILE_FORWARD_TOKENS
+        )
+        self._proton_forward_token_annotation = (
+            self._proton_forward_token_annotation_default
+        )
 
         # Profiler configuration
         self.profiler = None
@@ -121,6 +127,9 @@ class Worker(WorkerBase):
                 "backend": _normalize_proton_option(envs.PROTON_PROFILE_BACKEND),
                 "mode": _normalize_proton_option(envs.PROTON_PROFILE_MODE),
                 "hook": _normalize_proton_option(envs.PROTON_PROFILE_HOOK),
+                "forward_token_annotation": _normalize_proton_option(
+                    envs.PROTON_PROFILE_FORWARD_TOKENS
+                ),
             }
             logger.info("Proton profiler enabled.")
         elif envs.VLLM_TORCH_PROFILER_DIR:
@@ -152,6 +161,26 @@ class Worker(WorkerBase):
                 ),
             )
             self.profiler_type = "torch"
+
+    def _parse_proton_annotation(self, value: str | None, default: bool) -> bool:
+        if value is None:
+            return default
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        return default
+
+    def _set_proton_forward_token_annotation(self, enabled: bool) -> None:
+        self._proton_forward_token_annotation = bool(enabled)
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is not None and hasattr(
+            model_runner, "set_proton_token_annotation"
+        ):
+            model_runner.set_proton_token_annotation(
+                self._proton_forward_token_annotation
+            )
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -283,6 +312,9 @@ class Worker(WorkerBase):
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device
+        )
+        self.model_runner.set_proton_token_annotation(
+            self._proton_forward_token_annotation
         )
 
         if self.rank == 0:
@@ -633,11 +665,18 @@ class Worker(WorkerBase):
                             "backend",
                             "mode",
                             "hook",
+                            "forward_token_annotation",
                         ):
                             if key in profile_options:
                                 config[key] = _normalize_proton_option(
                                     profile_options[key]
                                 )
+
+                    annotation_enabled = self._parse_proton_annotation(
+                        config.get("forward_token_annotation"),
+                        self._proton_forward_token_annotation,
+                    )
+                    self._set_proton_forward_token_annotation(annotation_enabled)
 
                     name_prefix = config.get("name_prefix") or "proton_profile"
                     timestamp = int(time.time() * 1_000_000)
@@ -664,6 +703,9 @@ class Worker(WorkerBase):
                     proton.finalize()
                     self._proton_active = False
                     self._proton_active_config = None
+                    self._set_proton_forward_token_annotation(
+                        self._proton_forward_token_annotation_default
+                    )
         else:
             raise RuntimeError(f"Unknown profiler type {self.profiler_type}")
 

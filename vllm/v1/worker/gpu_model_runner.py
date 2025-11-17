@@ -270,6 +270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
+        self._proton_token_annotation = True
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -2416,7 +2417,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _compute_model_forward_phase(
         self, scheduler_output: "SchedulerOutput"
-    ) -> _ModelForwardPhase:
+    ) -> _ModelForwardPhase | None:
+        if not self._proton_token_annotation:
+            return None
         prefill_tokens = 0
         decode_tokens = 0
 
@@ -2437,6 +2440,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             decode_tokens += decode_this_step
 
         return _ModelForwardPhase(prefill_tokens=prefill_tokens, decode_tokens=decode_tokens)
+
+    def set_proton_token_annotation(self, enabled: bool) -> None:
+        self._proton_token_annotation = bool(enabled)
 
     def _model_forward(
         self,

@@ -183,7 +183,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
-        flashinfer_scope = proton.cpu_timed_scope("flashinfer_cutlass_fused_moe")
+        valid_topk_ids = topk_ids[topk_ids >= 0]
+        num_selected_experts = (
+            int(torch.unique(valid_topk_ids).numel())
+            if valid_topk_ids.numel() > 0
+            else 0
+        )
+
+        flashinfer_scope = proton.cpu_timed_scope(
+            "flashinfer_cutlass_fused_moe", metrics={"experts": num_selected_experts}
+        )
         flashinfer_scope._enter_scope()
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,

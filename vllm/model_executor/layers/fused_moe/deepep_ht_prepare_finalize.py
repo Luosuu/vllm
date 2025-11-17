@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import deep_ep
 import torch
+import triton.profiler as proton
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -132,7 +133,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         token_data = tokens
         if has_scales:
             token_data = (tokens, token_scales)
-
+            
+        dispatch_scope = proton.cpu_timed_scope("deepep_dispatch")
+        dispatch_scope._enter_scope()
         (
             token_data,
             expert_topk_ids,
@@ -157,7 +160,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
-
+        dispatch_scope._exit_scope()
+        
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
@@ -345,6 +349,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
         )
         previous_event = dbo_get_previous_event(self.buffer.capture)
+        combine_scope = proton.cpu_timed_scope("deepep_combine")
+        combine_scope._enter_scope()
         combined_x, _, event = self.buffer.combine(
             # HT combine only supports BF16
             x=fused_expert_output,
@@ -355,7 +361,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
-
+        combine_scope._exit_scope()
         dbo_switch_to_compute()
 
         if do_async:

@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     PROTON_PROFILE_BACKEND: str | None = None
     PROTON_PROFILE_MODE: str | None = None
     PROTON_PROFILE_HOOK: str | None = None
+    PROTON_PROFILE_FORWARD_TOKENS: bool = True
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
     VLLM_USE_TRITON_MOE: bool = False
@@ -823,6 +824,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "PROTON_PROFILE_BACKEND": lambda: os.getenv("PROTON_PROFILE_BACKEND"),
     "PROTON_PROFILE_MODE": lambda: os.getenv("PROTON_PROFILE_MODE"),
     "PROTON_PROFILE_HOOK": lambda: os.getenv("PROTON_PROFILE_HOOK"),
+    "PROTON_PROFILE_FORWARD_TOKENS": lambda: (
+        os.getenv("PROTON_PROFILE_FORWARD_TOKENS", "1").lower()
+        not in ("0", "false")
+    ),
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
     # traces (CPU & GPU) will be saved under this directory.
