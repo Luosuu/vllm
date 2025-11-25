@@ -405,6 +405,16 @@ def fused_moe_kernel(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
+    
+    # -----------------------------------------------------------
+    # A simpler way to get started
+    # pid = tl.program_id(axis=0)  # Get unique ID for this thread
+    # # num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)  # Number of blocks in M dimension
+    # num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)   # Number of blocks in N dimension
+
+    # # Simple 2D grid mapping
+    # pid_m = pid // num_pid_n  # Row index
+    # pid_n = pid % num_pid_n   # Column index
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.

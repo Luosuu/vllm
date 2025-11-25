@@ -623,6 +623,16 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
+    # Allow overriding model-derived parameters for custom tuning scenarios.
+    if args.override_num_experts is not None:
+        E = args.override_num_experts
+    if args.override_topk is not None:
+        topk = args.override_topk
+    if args.override_intermediate_size is not None:
+        intermediate_size = args.override_intermediate_size
+    if args.override_hidden_size is not None:
+        hidden_size = args.override_hidden_size
+
     enable_ep = bool(args.enable_expert_parallel)
     if enable_ep:
         ensure_divisibility(E, args.tp_size, "Number of experts")
@@ -779,6 +789,10 @@ if __name__ == "__main__":
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)
+    parser.add_argument("--override-num-experts", type=int, default=None)
+    parser.add_argument("--override-topk", type=int, default=None)
+    parser.add_argument("--override-intermediate-size", type=int, default=None)
+    parser.add_argument("--override-hidden-size", type=int, default=None)
     args = parser.parse_args()
 
     main(args)
