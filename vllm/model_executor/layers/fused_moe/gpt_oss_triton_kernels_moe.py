@@ -152,6 +152,9 @@ def triton_kernel_fused_experts(
     
     gammas = routing_data.gate_scal if routing_data else None
     tokens_involved = int(routing_data.expt_hist.sum().item()) if routing_data else 0
+    num_selected_experts = (
+        int((routing_data.expt_hist > 0).sum().item()) if routing_data else 0
+    )
     hidden_dim = hidden_states.shape[-1]
     interm_dim = w1.shape[-1]
     flops_matmul_ogs = 2 * tokens_involved * hidden_dim * interm_dim
@@ -163,10 +166,11 @@ def triton_kernel_fused_experts(
     matmul_ogs_w1_scope = proton.cpu_timed_scope(
         name="matmul_ogs-w1",
         metrics={
-            "flops": flops_matmul_ogs, 
-            "bytes": num_bytes(w1) + token_num_bytes
-            }
-        )
+            "flops": flops_matmul_ogs,
+            "bytes": num_bytes(w1) + token_num_bytes,
+            "experts": num_selected_experts,
+        },
+    )
     matmul_ogs_w1_scope._enter_scope()
 
     intermediate_cache1 = matmul_ogs(
@@ -184,10 +188,11 @@ def triton_kernel_fused_experts(
     matmul_ogs_w2_scope = proton.cpu_timed_scope(
         name="matmul_ogs-w2",
         metrics={
-            "flops": flops_matmul_ogs, 
-            "bytes": num_bytes(w1) + token_num_bytes
-            }
-        )
+            "flops": flops_matmul_ogs,
+            "bytes": num_bytes(w1) + token_num_bytes,
+            "experts": num_selected_experts,
+        },
+    )
     matmul_ogs_w2_scope._enter_scope()
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
@@ -325,6 +330,13 @@ class OAITritonExperts(BaseOAITritonExperts):
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
+
+        valid_topk_ids = topk_ids[topk_ids >= 0]
+        num_selected_experts = (
+            int(torch.unique(valid_topk_ids).numel())
+            if valid_topk_ids.numel() > 0
+            else 0
+        )
         
         mk_routing_data_scope = proton.cpu_timed_scope("OAITritonExperts-make_routing_data")
         mk_routing_data_scope._enter_scope()
@@ -334,7 +346,10 @@ class OAITritonExperts(BaseOAITritonExperts):
         mk_routing_data_scope._exit_scope()
         
         
-        triton_fused_experts_scope =  proton.cpu_timed_scope("OAITritonExperts-triton_kernel_fused_experts")
+        triton_fused_experts_scope = proton.cpu_timed_scope(
+            "OAITritonExperts-triton_kernel_fused_experts",
+            metrics={"experts": num_selected_experts},
+        )
         triton_fused_experts_scope._enter_scope()
         experts_output = triton_kernel_fused_experts(
             None,

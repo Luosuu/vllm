@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     PROTON_PROFILE_BACKEND: str | None = None
     PROTON_PROFILE_MODE: str | None = None
     PROTON_PROFILE_HOOK: str | None = None
+    PROTON_PROFILE_FORWARD_TOKENS: bool = True
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -856,6 +857,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "PROTON_PROFILE_BACKEND": lambda: os.getenv("PROTON_PROFILE_BACKEND"),
     "PROTON_PROFILE_MODE": lambda: os.getenv("PROTON_PROFILE_MODE"),
     "PROTON_PROFILE_HOOK": lambda: os.getenv("PROTON_PROFILE_HOOK"),
+    "PROTON_PROFILE_FORWARD_TOKENS": lambda: (
+        os.getenv("PROTON_PROFILE_FORWARD_TOKENS", "1").lower() not in ("0", "false")
+    ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,

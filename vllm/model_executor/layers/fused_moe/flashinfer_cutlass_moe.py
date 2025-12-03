@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import triton.profiler as proton
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -179,6 +180,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
+        valid_topk_ids = topk_ids[topk_ids >= 0]
+        num_selected_experts = (
+            int(torch.unique(valid_topk_ids).numel())
+            if valid_topk_ids.numel() > 0
+            else 0
+        )
+        
+        input_shape = hidden_states.shape
+        n_tok = input_shape[0]
+
+        flashinfer_scope = proton.cpu_timed_scope(
+            f"flashinfer_cutlass_fused_moe_nTok{n_tok}_nExpt{num_selected_experts}",
+        )
+        flashinfer_scope._enter_scope()
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
@@ -194,6 +209,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_rank=self.ep_rank,
             output=output,
         )
+        flashinfer_scope._exit_scope()
 
 
 def flashinfer_cutlass_moe_fp4(
