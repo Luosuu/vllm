@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed
 import torch.nn as nn
+import triton.profiler as proton
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -588,22 +589,24 @@ class Worker(WorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
-            self.profiler.start()
+            # self.profiler.start()
+            proton.start("proton_profile", context="python", hook="triton")
         else:
-            self.profiler.stop()
-            if isinstance(self.profiler, torch.profiler.profile):
-                rank = self.local_rank
-                profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                sort_key = "self_cuda_time_total"
-                table = self.profiler.key_averages().table(sort_by=sort_key)
+            proton.finalize()
+            # self.profiler.stop()
+            # if isinstance(self.profiler, torch.profiler.profile):
+            #     rank = self.local_rank
+            #     profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+            #     profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            #     sort_key = "self_cuda_time_total"
+            #     table = self.profiler.key_averages().table(sort_by=sort_key)
 
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
+            #     with open(profiler_out_file, "w") as f:
+            #         print(table, file=f)
 
-                # only print profiler results on rank 0
-                if rank == 0:
-                    print(table)
+            #     # only print profiler results on rank 0
+            #     if rank == 0:
+            #         print(table)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
