@@ -13,7 +13,9 @@ Started: Wed Mar  4 22:47:29 UTC 2026
 - ProtonProfilerWrapper takes `output_dir` and `local_rank` params (not `worker_name` like Torch)
 - `torch_profiler_dir` config field is shared between torch and proton profilers for output directory
 - Start/stop profile API is pass-through: LLM → LLMEngine → EngineCore → Worker.profile() — only worker has profiler type branching
+- GPU worker `__init__` has an EARLY profiler type validation (line ~148) that must include all valid profiler kinds — separate from the lazy init in `profile()`
 - Environment managed by `uv`; activate with `. .venv/bin/activate`
+- For TP>1, use `--tensor-parallel-size 2` with `vllm serve`; each rank produces its own `.hatchet` file
 ---
 
 ## 2026-03-04 - US-001
@@ -84,4 +86,22 @@ Started: Wed Mar  4 22:47:29 UTC 2026
   - All tests use `@requires_proton` skip marker for conditional execution when Proton is unavailable
   - Tests use `tempfile.TemporaryDirectory()` for clean output isolation
   - mypy passes with `--ignore-missing-imports` on the test file
+---
+
+## 2026-03-04 - US-007
+- What was implemented: End-to-end validation of Proton profiler with `vllm serve openai/gpt-oss-20b`
+- Bug found and fixed: GPU worker's `__init__` had profiler type validation (`line 148`) that only allowed "torch", "cuda", and None — missing "proton". This caused a `ValueError: Unknown profiler type: proton` crash at startup.
+- Files changed: `vllm/v1/worker/gpu_worker.py` (added "proton" to validation tuple)
+- Validation performed:
+  - `vllm serve openai/gpt-oss-20b --profiler-config '{"profiler": "proton", "torch_profiler_dir": "/tmp/proton_profiles"}' --tensor-parallel-size 2` started successfully
+  - `/start_profile` and `/stop_profile` endpoints triggered correctly
+  - `.hatchet` output files created for both ranks (`proton_rank0.hatchet`, `proton_rank1.hatchet`)
+  - Output contains 146 frames including CUDA kernels (NCCL AllGather, Marlin MOE), vLLM-specific kernels (`swigluoai_and_mul_kernel`), and generation context frames
+  - All 22 proton profiler tests pass, all 25 existing GPU profiler tests pass
+- **Learnings for future iterations:**
+  - GPU worker has TWO places where profiler type matters: (1) early validation in `__init__` and (2) lazy instantiation in `profile()` — both must be kept in sync when adding new profiler types
+  - The `openai/gpt-oss-20b` model requires TP=2 to fit on 2x L40S GPUs (46GB each)
+  - Server startup takes ~80s with model loading, compilation, and CUDA graph capture
+  - Proton `.hatchet` files are JSON format and can be inspected with standard JSON tools
+  - The profiler validation in `__init__` is separate from `ProfilerKind` type — adding to the Literal type is not enough
 ---

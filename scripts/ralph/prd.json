@@ -107,8 +107,8 @@
         "Profiling data contains meaningful Triton kernel information"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Required fixing profiler type validation in gpu_worker.py __init__ to include 'proton'"
     }
   ]
 }
