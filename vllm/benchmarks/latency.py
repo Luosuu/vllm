@@ -144,6 +144,12 @@ def main(args: argparse.Namespace):
                 "Profiling with torch profiler (results will be saved to"
                 f" {profiler_config.torch_profiler_dir})..."
             )
+        elif profiler_config.profiler == "proton":
+            output_dir = profiler_config.torch_profiler_dir or os.getcwd()
+            print(
+                f"Profiling with Proton profiler (results will be saved to"
+                f" {output_dir})..."
+            )
         elif profiler_config.profiler == "cuda":
             print("Profiling with cuda profiler ...")
         run_to_completion(do_profile=True)

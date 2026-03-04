@@ -785,6 +785,22 @@ class Worker(WorkerBase):
                     logger.debug(
                         "Starting torch profiler with trace name: %s", trace_name
                     )
+                elif profiler_type == "proton":
+                    from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+                    output_dir = (
+                        self.profiler_config.torch_profiler_dir
+                        or os.getcwd()
+                    )
+                    self.profiler = ProtonProfilerWrapper(
+                        self.profiler_config,
+                        output_dir=output_dir,
+                        local_rank=self.local_rank,
+                    )
+                    logger.debug(
+                        "Starting Proton profiler with trace name: %s",
+                        trace_name,
+                    )
                 elif profiler_type == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
