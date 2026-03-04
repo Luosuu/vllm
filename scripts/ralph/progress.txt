@@ -1,0 +1,70 @@
+# Ralph Progress Log
+Started: Wed Mar  4 22:47:29 UTC 2026
+
+## Codebase Patterns
+- Profiler code lives in `vllm/profiler/wrapper.py` (implementations) and `vllm/config/profiler.py` (config)
+- `ProfilerKind` is a `Literal` type in `vllm/config/profiler.py`
+- `WorkerProfiler` is the abstract base class; subclasses implement `_start()`, `_stop()`, and `annotate_context_manager()`
+- Profiler creation is inline in GPU worker's `profile()` method (no separate factory function)
+- GPU worker uses lazy profiler init; CPU/XPU workers use eager init
+- `triton.profiler` is the import path for Proton (`import triton.profiler as proton`)
+- Proton API: `proton.start(name, hook)` returns session_id, `proton.finalize(session=id)`, `proton.scope(name)` is a context manager
+- `proton.start()` accepts `hook="triton"` to capture Triton kernel launches
+- ProtonProfilerWrapper takes `output_dir` and `local_rank` params (not `worker_name` like Torch)
+- `torch_profiler_dir` config field is shared between torch and proton profilers for output directory
+- Start/stop profile API is pass-through: LLM → LLMEngine → EngineCore → Worker.profile() — only worker has profiler type branching
+- Environment managed by `uv`; activate with `. .venv/bin/activate`
+---
+
+## 2026-03-04 - US-001
+- What was implemented: Added Triton as a git submodule under `submodules/triton`
+- Files changed: `.gitmodules`, `submodules/triton` (new submodule)
+- **Learnings for future iterations:**
+  - Triton is already installed in the vLLM environment via pip; the submodule provides source access
+  - `import triton.profiler as proton` works with the pip-installed triton package
+  - Proton source and docs are at `submodules/triton/third_party/proton`
+  - Proton has a standalone Python package inside `third_party/proton/proton/` but the main API is accessed via `triton.profiler`
+  - The vLLM dev environment may be missing some deps (packaging, pydantic) — these are pre-existing issues
+---
+
+## 2026-03-04 - US-002
+- What was implemented: Added 'proton' to ProfilerKind literal type in `vllm/config/profiler.py`
+- Files changed: `vllm/config/profiler.py`
+- **Learnings for future iterations:**
+  - The ProfilerConfig validator already handles proton correctly — `torch_profiler_dir` validation only triggers for `profiler='torch'`, so proton passes without needing a directory
+  - The vLLM dev environment is missing many deps (pydantic, regex, psutil, cbor2, vllm._C) — full import chain fails without `uv pip install -e .` but AST analysis and targeted mypy work for verification
+  - mypy with `--ignore-missing-imports` is sufficient for typechecking individual files
+  - Profiler kind matching happens in `vllm/v1/worker/gpu_worker.py` (lines ~778-788), `vllm/v1/worker/cpu_worker.py`, `vllm/v1/worker/xpu_worker.py`, `vllm/v1/engine/async_llm.py`, and `vllm/benchmarks/latency.py` — these will need updating in US-005
+---
+
+## 2026-03-04 - US-003
+- What was implemented: Added `ProtonProfilerWrapper` class to `vllm/profiler/wrapper.py`
+- Files changed: `vllm/profiler/wrapper.py`
+- **Learnings for future iterations:**
+  - `proton.start()` returns a session ID that must be passed to `proton.finalize(session=id)` for proper cleanup
+  - `proton.scope(name)` is both a context manager and decorator — works perfectly for `annotate_context_manager()`
+  - The `hook="triton"` parameter in `proton.start()` enables capturing Triton kernel launches
+  - Proton writes `.hatchet` files by default when `data="tree"` (the default)
+  - Output file naming: `proton_rank{local_rank}` — Proton appends `.hatchet` extension automatically
+  - The `import os` inside `_start()` follows the lazy import pattern used elsewhere in the codebase
+---
+
+## 2026-03-04 - US-004
+- What was implemented: Verified Proton annotation integration — already implemented in US-003
+- Files changed: None (code already complete in `vllm/profiler/wrapper.py` lines 354-363)
+- **Learnings for future iterations:**
+  - `proton.scope()` works correctly even without an active profiling session — safe to call anytime
+  - The only annotation call site is `vllm/v1/worker/gpu_worker.py:651` — it's generic and works with any `WorkerProfiler` subclass
+  - US-003 already implemented `annotate_context_manager()` for `ProtonProfilerWrapper`, so US-004 was a no-op
+---
+
+## 2026-03-04 - US-005
+- What was implemented: Wired ProtonProfilerWrapper into GPU worker's `profile()` method and benchmarks
+- Files changed: `vllm/v1/worker/gpu_worker.py`, `vllm/config/profiler.py`, `vllm/benchmarks/latency.py`
+- **Learnings for future iterations:**
+  - The ProfilerConfig validator needed relaxing to allow `torch_profiler_dir` with proton (previously only allowed for torch)
+  - CPU and XPU workers use eager profiler init (in `__init__`) and only support torch — they don't need proton wiring since Proton is GPU/Triton-specific
+  - `async_llm.py` frontend profiling is torch-specific (CPU activity tracing) — no changes needed for proton
+  - The start/stop profile API flow: `LLM.start_profile()` → `LLMEngine.start_profile()` → `EngineCore.profile()` → `Worker.profile()` — all intermediaries are pass-through, only the worker needs the proton branch
+  - For proton output dir, falls back to `os.getcwd()` if `torch_profiler_dir` is not set
+---

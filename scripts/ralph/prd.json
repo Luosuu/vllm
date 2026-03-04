@@ -1,0 +1,114 @@
+{
+  "project": "vLLM",
+  "branchName": "ralph/proton-profiler",
+  "description": "Integrate Triton Proton profiler as a new backend in vLLM, complementing existing torch and cuda profilers",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add Triton as a git submodule",
+      "description": "As a developer, I need Triton available as a submodule so I can install the latest Proton profiler with up-to-date features.",
+      "acceptanceCriteria": [
+        "Triton added as git submodule under submodules/triton pointing to https://github.com/triton-lang/triton.git",
+        ".gitmodules updated with the submodule entry",
+        "Proton is importable after running uv pip install -e submodules/triton",
+        "import triton.profiler as proton works in the vLLM environment",
+        "Existing vLLM build process is not broken"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Proton source code and documentation are located at submodules/triton/third_party/proton after adding the submodule"
+    },
+    {
+      "id": "US-002",
+      "title": "Add proton to ProfilerKind config",
+      "description": "As a developer, I need 'proton' recognized as a valid profiler kind so the config system can route to the Proton backend.",
+      "acceptanceCriteria": [
+        "ProfilerKind literal in vllm/config/profiler.py includes 'proton'",
+        "ProfilerConfig accepts profiler='proton' without validation errors",
+        "Existing 'torch' and 'cuda' options continue to work unchanged",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Implement ProtonProfilerWrapper class",
+      "description": "As a developer, I need a ProtonProfilerWrapper class that implements the WorkerProfiler interface so Proton profiling integrates with vLLM's profiler lifecycle.",
+      "acceptanceCriteria": [
+        "ProtonProfilerWrapper extends WorkerProfiler in vllm/profiler/wrapper.py",
+        "_start() initializes a Proton profiling session via proton.start()",
+        "_stop() finalizes the Proton session and writes output via proton.finalize()",
+        "Output is written in Proton's native .hatchet format to the configured output directory",
+        "Multi-rank support: output files include rank suffix consistent with existing profilers",
+        "Profiler is instantiated correctly from ProfilerConfig when profiler='proton'",
+        "Lazy import of triton.profiler to avoid import errors when not installed",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Refer to Proton source and docs at submodules/triton/third_party/proton for API details"
+    },
+    {
+      "id": "US-004",
+      "title": "Integrate Proton annotations with existing annotation system",
+      "description": "As a user, I want existing annotated regions in vLLM to appear in Proton traces so I get meaningful profiling data without code changes.",
+      "acceptanceCriteria": [
+        "annotate_context_manager() in vllm/profiler/wrapper.py supports Proton's scope/annotation API",
+        "When Proton profiler is active, proton.scope() or equivalent is used for region marking",
+        "Existing annotation call sites work with Proton without modification",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Wire ProtonProfilerWrapper into worker and factory",
+      "description": "As a user, I want to select Proton profiler via config and have it work end-to-end through the existing start/stop profile API.",
+      "acceptanceCriteria": [
+        "create_worker_profiler() or equivalent factory in vllm/profiler/wrapper.py handles 'proton' kind",
+        "Proton profiler can be started/stopped via vllm serve + /start_profile and /stop_profile API endpoints",
+        "Proton profiler can be started/stopped via LLM.start_profile() / LLM.stop_profile() in offline mode",
+        "Profiling output file is created in the configured directory",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Write tests for Proton profiler integration",
+      "description": "As a developer, I need tests to verify the Proton profiler backend works correctly.",
+      "acceptanceCriteria": [
+        "Unit test: ProtonProfilerWrapper correctly implements start/stop lifecycle",
+        "Unit test: Proton annotation context manager works",
+        "Integration test: end-to-end profiling with profiler='proton' produces output file",
+        "Test that ProfilerConfig(profiler='proton') is valid",
+        "Tests skip gracefully if Proton is not installed (conditional skip)",
+        "All existing profiler tests continue to pass",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "End-to-end validation with vllm serve",
+      "description": "As a developer, I need to validate that Proton profiling works end-to-end with the vllm serve command using openai/gpt-oss-20b model.",
+      "acceptanceCriteria": [
+        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"torch_profiler_dir\": \"${VLLM_TORCH_PROFILER_DIR}\"}' starts without errors",
+        "Triggering /start_profile and /stop_profile endpoints produces .hatchet profiling output",
+        "Output file is written to the configured directory",
+        "Profiling data contains meaningful Triton kernel information"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
