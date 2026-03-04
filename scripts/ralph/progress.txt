@@ -68,3 +68,20 @@ Started: Wed Mar  4 22:47:29 UTC 2026
   - The start/stop profile API flow: `LLM.start_profile()` → `LLMEngine.start_profile()` → `EngineCore.profile()` → `Worker.profile()` — all intermediaries are pass-through, only the worker needs the proton branch
   - For proton output dir, falls back to `os.getcwd()` if `torch_profiler_dir` is not set
 ---
+
+## 2026-03-04 - US-006
+- What was implemented: Verified existing Proton profiler tests pass (22/22 tests, plus all 25 existing GPU profiler tests)
+- Files changed: `scripts/ralph/prd.json` (marked US-006 as passing)
+- Test file already existed: `tests/v1/worker/test_proton_profiler.py` (committed in 1119a5c3f)
+- Tests cover:
+  - ProfilerConfig validation with profiler='proton' (7 tests)
+  - ProtonProfilerWrapper start/stop lifecycle (10 tests)
+  - Proton annotation context manager (2 tests)
+  - End-to-end profiling output file creation (2 tests)
+  - Graceful skip when Proton not installed (1 test)
+- **Learnings for future iterations:**
+  - `tblib` package was missing from the dev environment — needed for conftest.py
+  - All tests use `@requires_proton` skip marker for conditional execution when Proton is unavailable
+  - Tests use `tempfile.TemporaryDirectory()` for clean output isolation
+  - mypy passes with `--ignore-missing-imports` on the test file
+---
