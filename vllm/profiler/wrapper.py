@@ -293,6 +293,76 @@ class TorchProfilerWrapper(WorkerProfiler):
         return torch.profiler.record_function(name)
 
 
+class ProtonProfilerWrapper(WorkerProfiler):
+    """Wrapper for the Triton Proton profiler.
+
+    Proton profiles Triton kernels and GPU activity, writing output
+    in .hatchet format. The triton.profiler module is lazily imported
+    to avoid errors when Triton is not installed.
+    """
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        output_dir: str,
+        local_rank: int,
+    ) -> None:
+        """Initialize the Proton profiler wrapper.
+
+        Args:
+            profiler_config: The profiler configuration.
+            output_dir: Directory to write profiling output files.
+            local_rank: The local rank of this worker, used for
+                multi-rank output file naming.
+        """
+        super().__init__(profiler_config)
+
+        # Lazy import to avoid errors when Triton is not installed
+        import triton.profiler as proton
+
+        self._proton = proton
+        self._output_dir = output_dir
+        self._local_rank = local_rank
+        self._session_id: int | None = None
+
+        if local_rank in (None, 0):
+            logger.info_once(
+                "Proton profiling enabled. Output will be saved to: %s",
+                output_dir,
+                scope="local",
+            )
+
+    @override
+    def _start(self) -> None:
+        """Start a Proton profiling session."""
+        import os
+
+        output_path = os.path.join(
+            self._output_dir, f"proton_rank{self._local_rank}"
+        )
+        self._session_id = self._proton.start(
+            name=output_path, hook="triton"
+        )
+
+    @override
+    def _stop(self) -> None:
+        """Finalize the Proton profiling session and write output."""
+        self._proton.finalize(session=self._session_id)
+        self._session_id = None
+
+    @override
+    def annotate_context_manager(self, name: str):
+        """Return a Proton scope context manager for region annotation.
+
+        Args:
+            name: The name of the annotated region.
+
+        Returns:
+            A proton.scope context manager.
+        """
+        return self._proton.scope(name)
+
+
 class CudaProfilerWrapper(WorkerProfiler):
     def __init__(self, profiler_config: ProfilerConfig) -> None:
         super().__init__(profiler_config)
