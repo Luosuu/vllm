@@ -1,73 +1,157 @@
 {
-  "project": "vLLM Proton Early Start Fix",
-  "branchName": "ralph/proton-profiling-study",
-  "description": "Fix Proton 'Cannot find graph for graphExecId' warning by starting Proton session before CUDA graph capture and deactivating after capture completes",
+  "project": "nano-vllm-proton",
+  "branchName": "ralph/nano-vllm-proton",
+  "description": "Add independent Proton profiler integration to nano-vllm submodule for kernel-level GPU profiling and side-by-side comparison with vLLM",
+  "instructions": [
+    "All changes go inside the submodules/nano-vllm/ directory — do NOT modify vLLM code",
+    "Make clear and simple code design for ease of understanding",
+    "Write docstring and inline comments for every method",
+    "Write comprehensive tests for every function: unit tests, integration tests, smoke tests",
+    "Only write absolutely necessary code, avoid redundant code, keep codebase clean",
+    "Avoid fallbacks and try-catch — fail early to discover issues at the shallow surface",
+    "Python environment is managed by uv. Run `. .venv/bin/activate` and use `uv pip install ...`",
+    "Do not include claude as co-author in commit message",
+    "Do not include US-00X in commit message, follow vLLM commit message style",
+    "nano-vllm profiler is fully independent — no vLLM imports or dependencies",
+    "Use module-level singleton pattern (get_profiler/set_profiler) for global profiler access",
+    "When profiler is not active, annotations must be no-ops with zero overhead"
+  ],
   "userStories": [
     {
       "id": "US-001",
-      "title": "Add start_and_deactivate method to ProtonProfilerWrapper",
-      "description": "As a developer, I want ProtonProfilerWrapper to support creating a session and later deactivating it so that the GPU worker can start Proton before CUDA graph capture and deactivate after capture completes.",
+      "title": "Proton profiler module with basic start/stop lifecycle",
+      "description": "As a developer, I want a self-contained Proton profiler module in nano-vllm so that I can start/stop profiling sessions and collect GPU traces.",
       "acceptanceCriteria": [
-        "Add a public method start_and_deactivate() to ProtonProfilerWrapper in vllm/profiler/wrapper.py",
-        "start_and_deactivate() calls _create_session() to create the Proton session via proton.start()",
-        "start_and_deactivate() does NOT immediately deactivate — the caller controls when to deactivate",
-        "Add a public method deactivate_early() that calls proton.deactivate() WITHOUT flushing to pause the session",
-        "After start_and_deactivate() + deactivate_early(), internal state has _session_id set and _running is False",
-        "Subsequent calls to _start() detect existing _session_id and call proton.activate() instead of proton.start() (for both periodic and non-periodic modes)",
-        "In non-periodic mode, _stop() after an activate()-based start calls proton.deactivate(flushing=True) then proton.finalize(), not just proton.finalize()",
-        "Unit tests cover: start_and_deactivate then deactivate_early then _start activates existing session then _stop finalizes",
-        "Unit tests cover: both periodic and non-periodic modes work correctly with the early-start pattern",
-        "Typecheck passes"
+        "New file nanovllm/profiler.py with a ProtonProfiler class",
+        "ProtonProfiler supports start(), stop(), shutdown(), get_status() methods",
+        "Lazy import of triton.profiler — fails clearly if Proton is unavailable",
+        "Configurable output directory, context (shadow/python), data format (tree/trace), backend (cupti/roctracer/instrumentation/auto), hook (triton/None), and mode (including periodic_flushing)",
+        "Rank-aware output file naming (proton_rank{N}.hatchet or .chrome_trace)",
+        "Module-level get_profiler() and set_profiler() singleton functions",
+        "A proton_scope() context manager helper that is a no-op when profiler is None",
+        "Unit tests for initialization, start/stop lifecycle, config validation, and singleton access",
+        "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "This is the core wrapper change. The two-method split (start_and_deactivate + deactivate_early) lets the GPU worker keep Proton active during CUDA graph capture and deactivate only after capture completes."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Wire early Proton start in GPU worker compile_or_warm_up_model",
-      "description": "As a developer profiling vLLM with Proton, I want the Proton session started before CUDA graph capture and deactivated after capture so that Proton tracks graph creation without the 'Cannot find graph' warning.",
+      "title": "Periodic flushing and phase tracking",
+      "description": "As a developer, I want periodic flushing support so that I can profile multiple intervals in a single session without unbounded memory growth.",
       "acceptanceCriteria": [
-        "In gpu_worker.py compile_or_warm_up_model(), when profiler_config.profiler == 'proton', create ProtonProfilerWrapper and call start_and_deactivate() BEFORE capture_model() is called",
-        "Call deactivate_early() AFTER capture_model() returns — Proton is active during the entire CUDA graph capture phase",
-        "Store the wrapper in self.profiler so profile(is_start=True) reuses it via the existing 'if self.profiler is None' guard",
-        "Only Proton profiler gets early initialization — torch and cuda profiler types are unaffected",
-        "When enforce_eager is True (no CUDA graph capture), still start and deactivate Proton early for consistency",
-        "Typecheck passes"
+        "When mode starts with periodic_flushing, session persists across start/stop cycles",
+        "First start() creates session via proton.start(), subsequent calls use proton.activate()",
+        "stop() calls proton.deactivate(flushing=True) and advances phase via proton.data.advance_phase()",
+        "shutdown() calls proton.finalize() to close the persistent session",
+        "get_status() returns current phase number, output directory, and list of output files",
+        "Per-phase output files: proton_rank{N}.part_{phase}.hatchet",
+        "Unit tests for multi-cycle periodic flushing sequences and phase tracking",
+        "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Depends on US-001. Key sequence: proton.start() → warmup + capture_model() → proton.deactivate(). The existing profile() method already guards with 'if self.profiler is None' so it will reuse the early-created wrapper."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Ensure profile() reuses early-initialized Proton profiler correctly",
-      "description": "As a developer, I want profile(is_start=True) to correctly activate the deactivated Proton session created during init rather than creating a duplicate.",
+      "title": "Scope annotations for engine and scheduler",
+      "description": "As a developer, I want Proton scope annotations on engine and scheduler operations so that profiling output shows scheduling and orchestration time.",
       "acceptanceCriteria": [
-        "profile(is_start=True) skips wrapper creation when self.profiler is not None (existing guard at line 776)",
-        "profile(is_start=True) calls self.profiler.start() which internally calls proton.activate() on the existing deactivated session",
-        "profile(is_start=False) calls self.profiler.stop() which works correctly whether session was early-started or not",
-        "Both periodic and non-periodic Proton modes work correctly: start_profile → generate → stop_profile cycle produces valid output",
-        "Unit tests verify the full lifecycle: early init in compile_or_warm_up_model → start_profile → stop_profile",
-        "Typecheck passes"
+        "LLMEngine.step() annotated with scope distinguishing prefill vs decode phase",
+        "Scheduler.schedule() annotated",
+        "BlockManager.allocate() and BlockManager.deallocate() annotated",
+        "Annotations use the proton_scope() helper from US-001 — no-ops when profiler is None",
+        "Unit tests verifying scope annotations are applied correctly",
+        "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Depends on US-001 and US-002. This story verifies the integration between early init and the existing profile() API. The existing 'if self.profiler is None' guard should handle this naturally."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Verify fix with vllm_offline.sh end-to-end",
-      "description": "As a developer, I want to run the offline profiling script and confirm the Proton warning is eliminated and valid profiles are produced.",
+      "title": "Scope annotations for model runner and CUDA graphs",
+      "description": "As a developer, I want Proton scope annotations on model runner operations so that profiling output shows GPU execution and CUDA graph overhead.",
       "acceptanceCriteria": [
-        "Run scripts/profiling/vllm_offline.sh end-to-end (or sanity_check.sh with a small model)",
-        "No '[PROTON] Cannot find graph for graphExecId' warning in output",
-        "Valid .hatchet output files are produced and loadable by proton-viewer",
-        "Profile output includes CUDA graph capture activity (visible in proton-viewer output)"
+        "ModelRunner.run_model() annotated (distinguish eager vs CUDA graph replay)",
+        "ModelRunner.capture_cudagraph() annotated",
+        "ModelRunner.warmup_model() and ModelRunner.allocate_kv_cache() annotated",
+        "Annotations placed outside CUDA graph replay calls to avoid interference",
+        "Unit tests verifying scope annotations are applied correctly",
+        "Tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Depends on US-002 and US-003. This is a manual verification story — run the actual profiling script and check output."
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Scope annotations for attention, layers, and sampler",
+      "description": "As a developer, I want Proton scope annotations on individual model layers so that profiling output shows per-layer GPU time breakdown.",
+      "acceptanceCriteria": [
+        "Attention.forward() annotated (distinguish prefill attention vs decode attention)",
+        "store_kvcache_kernel Triton kernel execution annotated",
+        "Sampler.forward() annotated",
+        "Qwen3DecoderLayer, Qwen3Attention, and Qwen3MLP forward() methods annotated",
+        "VocabParallelEmbedding.forward() and ParallelLMHead.forward() annotated",
+        "Unit tests verifying scope annotations are applied correctly",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "CLI integration for bench.py",
+      "description": "As a developer, I want CLI flags on bench.py so that I can run profiled benchmarks from the command line.",
+      "acceptanceCriteria": [
+        "--profiler proton flag enables Proton profiling for the benchmark run",
+        "--proton-dir <path> sets the output directory (required when --profiler proton)",
+        "--proton-context {shadow,python} sets context mode (default: shadow)",
+        "--proton-data {tree,trace} sets output format (default: tree)",
+        "--proton-backend {cupti,roctracer,instrumentation} sets GPU backend (default: auto)",
+        "--proton-mode <string> sets mode (e.g., periodic_flushing)",
+        "--proton-hook {triton} sets kernel hook (default: None)",
+        "Profiler starts before inference, stops after, and prints output file paths on completion",
+        "Smoke test: python bench.py --profiler proton --proton-dir /tmp/proton_out runs without error",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "CLI integration for example.py",
+      "description": "As a developer, I want CLI flags on example.py so that I can profile example inference runs.",
+      "acceptanceCriteria": [
+        "Same --profiler and --proton-* CLI flags as bench.py added to example.py",
+        "Profiler lifecycle managed around the generate() call",
+        "Reuse argparse flag setup from bench.py via shared helper if possible",
+        "Smoke test: python example.py --profiler proton --proton-dir /tmp/proton_out runs without error",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "End-to-end profiling validation",
+      "description": "As a developer, I want to verify that Proton profiling produces valid output files from nano-vllm inference.",
+      "acceptanceCriteria": [
+        "Integration test that runs bench.py with --profiler proton --proton-data tree and verifies .hatchet output files exist and are non-empty",
+        "Integration test for --proton-data trace verifying .chrome_trace output files",
+        "Integration test for periodic flushing mode verifying per-phase .part_N.hatchet files",
+        "Output files contain annotated scopes (verified by checking file content or proton-viewer)",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
