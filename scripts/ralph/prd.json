@@ -154,7 +154,7 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "The WorkerProfiler base class already has a shutdown() method that calls stop(). In periodic mode, ProtonProfilerWrapper needs to override shutdown() to also call proton.finalize(). Check gpu_worker.py for existing shutdown/cleanup hooks."
     },
     {

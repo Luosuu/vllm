@@ -147,3 +147,17 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - LaunchEngineClient has no-op stubs — use non-abstract methods in protocol for graceful fallback
   - Executor.collective_rpc() returns list[dict] (one per worker) — aggregate at executor level
 ---
+
+## 2026-03-05 - US-009
+- Verified GPU worker shutdown path already calls profiler.shutdown() (gpu_worker.py:943-944)
+- ProtonProfilerWrapper.shutdown() already calls proton.finalize(session) in periodic mode (wrapper.py:510)
+- Executor shutdown delegates to worker.shutdown() which triggers profiler cleanup
+- Implementation was completed as part of US-006 (periodic mode lifecycle) and US-008 (shutdown wiring)
+- All 49 proton profiler tests pass, typecheck passes (0 errors in profiler wrapper)
+- No code changes needed — all acceptance criteria already met
+- Files changed: scripts/ralph/prd.json, scripts/ralph/progress.txt
+- **Learnings for future iterations:**
+  - GPU worker shutdown path: executor.shutdown() → worker.shutdown() → profiler.shutdown()
+  - ProtonProfilerWrapper.shutdown() handles both periodic (finalize session) and non-periodic (delegate to base stop) modes
+  - When acceptance criteria are already met by prior stories, verify via tests and typecheck rather than re-implementing
+---
