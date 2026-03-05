@@ -130,6 +130,20 @@ class EngineClient(ABC):
         """Stop profiling the engine"""
         ...
 
+    async def get_profile_status(self) -> dict:
+        """Get current profiling status from the engine.
+
+        Returns a dict with: active, profiler, current_phase,
+        output_dir, output_files.
+        """
+        return {
+            "active": False,
+            "profiler": None,
+            "current_phase": 0,
+            "output_dir": "",
+            "output_files": [],
+        }
+
     @abstractmethod
     async def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache"""

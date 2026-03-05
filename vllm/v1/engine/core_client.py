@@ -141,6 +141,9 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
+    def profile_status(self) -> dict:
+        raise NotImplementedError
+
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
@@ -216,6 +219,9 @@ class EngineCoreClient(ABC):
     async def profile_async(
         self, is_start: bool = True, profile_prefix: str | None = None
     ) -> None:
+        raise NotImplementedError
+
+    async def profile_status_async(self) -> dict:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -302,6 +308,9 @@ class InprocClient(EngineCoreClient):
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.engine_core.profile(is_start, profile_prefix)
+
+    def profile_status(self) -> dict:
+        return self.engine_core.profile_status()
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -843,6 +852,10 @@ class SyncMPClient(MPClient):
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.call_utility("profile", is_start, profile_prefix)
 
+    def profile_status(self) -> dict:
+        """Get profiling status via the engine core utility RPC."""
+        return self.call_utility("profile_status")
+
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
@@ -1090,6 +1103,10 @@ class AsyncMPClient(MPClient):
         self, is_start: bool = True, profile_prefix: str | None = None
     ) -> None:
         await self.call_utility_async("profile", is_start, profile_prefix)
+
+    async def profile_status_async(self) -> dict:
+        """Get profiling status via the engine core async utility RPC."""
+        return await self.call_utility_async("profile_status")
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")

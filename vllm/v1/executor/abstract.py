@@ -249,6 +249,28 @@ class Executor(ABC):
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
+    def profile_status(self) -> dict:
+        """Get aggregated profiling status from all workers.
+
+        Collects status from each worker and merges output_files
+        across all ranks into a single response.
+        """
+        results: list[dict] = self.collective_rpc("profile_status")
+        if not results:
+            return {
+                "active": False,
+                "current_phase": 0,
+                "output_dir": "",
+                "output_files": [],
+            }
+        # Take base status from rank 0, aggregate output_files from all ranks
+        status = dict(results[0])
+        all_files: list[str] = []
+        for r in results:
+            all_files.extend(r.get("output_files", []))
+        status["output_files"] = sorted(all_files)
+        return status
+
     def save_sharded_state(
         self,
         path: str,

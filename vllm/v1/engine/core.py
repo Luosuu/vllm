@@ -554,6 +554,10 @@ class EngineCore:
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
 
+    def profile_status(self) -> dict:
+        """Get profiling status from all workers."""
+        return self.model_executor.profile_status()
+
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 sender, P1 receiver)

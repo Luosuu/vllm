@@ -145,6 +145,19 @@ class WorkerProfiler(ABC):
         if self._running:
             self.stop()
 
+    def get_status(self) -> dict:
+        """Return current profiling status.
+
+        Base implementation returns minimal status. Subclasses may
+        override to include additional fields (e.g., phase tracking).
+        """
+        return {
+            "active": self._running,
+            "current_phase": 0,
+            "output_dir": "",
+            "output_files": [],
+        }
+
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()

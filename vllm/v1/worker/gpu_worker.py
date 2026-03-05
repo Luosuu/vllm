@@ -817,6 +817,21 @@ class Worker(WorkerBase):
                 return
             self.profiler.stop()
 
+    def profile_status(self) -> dict:
+        """Return current profiling status from this worker's profiler.
+
+        Returns a dict with active, current_phase, output_dir, output_files.
+        Returns a default dict if no profiler is configured or initialized.
+        """
+        if self.profiler is None:
+            return {
+                "active": False,
+                "current_phase": 0,
+                "output_dir": "",
+                "output_files": [],
+            }
+        return self.profiler.get_status()
+
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
 

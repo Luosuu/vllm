@@ -3,7 +3,7 @@
 
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
@@ -32,6 +32,21 @@ async def stop_profile(raw_request: Request):
     await engine_client(raw_request).stop_profile()
     logger.info("Profiler stopped.")
     return Response(status_code=200)
+
+
+@router.get("/profile_status")
+async def profile_status(raw_request: Request):
+    """Return current profiling status as JSON.
+
+    Returns active state, profiler type, current phase,
+    output directory, and list of output files.
+    """
+    client = engine_client(raw_request)
+    status = await client.get_profile_status()
+    # Add profiler type from config stored on the app
+    profiler_config: ProfilerConfig = raw_request.app.state.args.profiler_config
+    status["profiler"] = profiler_config.profiler
+    return JSONResponse(content=status)
 
 
 def attach_router(app: FastAPI):
