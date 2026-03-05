@@ -95,6 +95,124 @@ class TestProfilerConfigProton:
         )
         assert config.max_iterations == 10
 
+    def test_invalid_proton_context_raises(self):
+        """Test that invalid proton_context value raises validation error."""
+        with pytest.raises(ValueError, match="proton_context must be one of"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_context="invalid",
+            )
+
+    def test_invalid_proton_data_raises(self):
+        """Test that invalid proton_data value raises validation error."""
+        with pytest.raises(ValueError, match="proton_data must be one of"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_data="invalid",
+            )
+
+    def test_invalid_proton_backend_raises(self):
+        """Test that invalid proton_backend value raises validation error."""
+        with pytest.raises(ValueError, match="proton_backend must be one of"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_backend="invalid",
+            )
+
+    def test_invalid_proton_hook_raises(self):
+        """Test that invalid proton_hook value raises validation error."""
+        with pytest.raises(ValueError, match="proton_hook must be one of"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_hook="invalid",
+            )
+
+    def test_proton_mode_accepts_arbitrary_strings(self):
+        """Test that proton_mode accepts any string without validation error."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="any-arbitrary-string-123",
+        )
+        assert config.proton_mode == "any-arbitrary-string-123"
+
+    def test_proton_config_valid_all_fields(self):
+        """Test valid config with all Proton fields explicitly set."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_context="python",
+            proton_data="trace",
+            proton_backend="cupti",
+            proton_mode="custom-mode",
+            proton_hook="triton",
+        )
+        assert config.proton_context == "python"
+        assert config.proton_data == "trace"
+        assert config.proton_backend == "cupti"
+        assert config.proton_mode == "custom-mode"
+        assert config.proton_hook == "triton"
+
+    def test_proton_profiler_dir_converted_to_absolute(self):
+        """Test that relative proton_profiler_dir is converted to absolute."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="relative/path",
+        )
+        assert os.path.isabs(config.proton_profiler_dir)
+
+    def test_proton_profiler_dir_uri_not_converted(self):
+        """Test that URI paths for proton_profiler_dir are not converted."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="gs://bucket/proton_out",
+        )
+        assert config.proton_profiler_dir == "gs://bucket/proton_out"
+
+    def test_proton_valid_backend_values(self):
+        """Test all valid proton_backend values are accepted."""
+        for backend in ("cupti", "roctracer", "instrumentation", None):
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_backend=backend,
+            )
+            assert config.proton_backend == backend
+
+    def test_proton_valid_context_values(self):
+        """Test all valid proton_context values are accepted."""
+        for context in ("shadow", "python"):
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_context=context,
+            )
+            assert config.proton_context == context
+
+    def test_proton_valid_data_values(self):
+        """Test all valid proton_data values are accepted."""
+        for data in ("tree", "trace"):
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_data=data,
+            )
+            assert config.proton_data == data
+
+    def test_proton_valid_hook_values(self):
+        """Test all valid proton_hook values are accepted."""
+        for hook in ("triton", None):
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir="/tmp/proton_out",
+                proton_hook=hook,
+            )
+            assert config.proton_hook == hook
+
 
 @requires_proton
 class TestProtonProfilerWrapper:
@@ -306,6 +424,94 @@ class TestProtonEndToEnd:
             assert len(rank1_files) > 0, (
                 f"Expected rank1 output file, found: {output_files}"
             )
+
+
+@requires_proton
+class TestProtonConfigWiring:
+    """Integration tests that Proton config fields are correctly passed
+    to proton.start() arguments via ProtonProfilerWrapper."""
+
+    def _make_wrapper_with_mock(self, config, output_dir="/tmp/proton_out",
+                                local_rank=0):
+        """Create a ProtonProfilerWrapper then replace _proton with a mock.
+
+        Returns (wrapper, mock_proton) tuple.
+        """
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        wrapper = ProtonProfilerWrapper(
+            profiler_config=config,
+            output_dir=output_dir,
+            local_rank=local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        wrapper._proton = mock_proton
+        return wrapper, mock_proton
+
+    def test_config_fields_passed_to_proton_start(self):
+        """Test that all config fields are correctly forwarded to proton.start().
+
+        Replaces the _proton module reference with a mock to verify the exact
+        arguments passed to proton.start() match the ProfilerConfig values.
+        """
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_context="python",
+            proton_data="trace",
+            proton_backend="cupti",
+            proton_mode="custom-mode",
+            proton_hook="triton",
+        )
+
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        wrapper._start()
+
+        # Verify proton.start() was called with all config fields
+        mock_proton.start.assert_called_once()
+        call_kwargs = mock_proton.start.call_args
+        assert call_kwargs.kwargs["context"] == "python"
+        assert call_kwargs.kwargs["data"] == "trace"
+        assert call_kwargs.kwargs["backend"] == "cupti"
+        assert call_kwargs.kwargs["mode"] == "custom-mode"
+        assert call_kwargs.kwargs["hook"] == "triton"
+        # name should include the output dir and rank
+        assert "proton_rank0" in call_kwargs.kwargs["name"]
+
+    def test_config_defaults_passed_to_proton_start(self):
+        """Test that default config values are forwarded to proton.start()."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        wrapper._start()
+
+        call_kwargs = mock_proton.start.call_args
+        # Defaults: context=shadow, data=tree, backend=None, mode=None, hook=None
+        assert call_kwargs.kwargs["context"] == "shadow"
+        assert call_kwargs.kwargs["data"] == "tree"
+        assert call_kwargs.kwargs["backend"] is None
+        assert call_kwargs.kwargs["mode"] is None
+        assert call_kwargs.kwargs["hook"] is None
+
+    def test_stop_calls_finalize_with_session_id(self):
+        """Test that _stop() calls proton.finalize() with the correct session ID."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        mock_proton.start.return_value = 99
+        wrapper._start()
+        assert wrapper._session_id == 99
+
+        wrapper._stop()
+        mock_proton.finalize.assert_called_once_with(session=99)
+        assert wrapper._session_id is None
 
 
 class TestProtonImportGuard:
