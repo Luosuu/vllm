@@ -293,3 +293,15 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Backend CLI default is None (mapped to "auto" internally) to distinguish "not specified" from explicit choice
   - Source-level verification tests work well for entry point scripts that can't be imported without heavy deps
 ---
+
+## 2026-03-05 - US-007 (nano-vllm)
+- Added --profiler proton and --proton-* CLI flags to example.py
+- Reused shared `profiler_cli.py` helpers (add_profiler_args, create_profiler_from_args, print_profiler_status)
+- Profiler lifecycle wraps generate() call: start() before, stop()/shutdown()/print_status() after
+- Added 12 source-level verification tests in TestExamplePyCLI class (44 CLI tests total, 146 total)
+- Files changed: submodules/nano-vllm/example.py, submodules/nano-vllm/tests/test_profiler_cli.py
+- **Learnings for future iterations:**
+  - The shared profiler_cli.py module makes adding profiler support to new entry points trivial — just import and wire up
+  - example.py uses `llm.generate(prompts, sampling_params)` (positional args) vs bench.py's `llm.generate(prompt_token_ids, sampling_params)` — tests must search for `llm.generate(` not specific arg patterns
+  - Using `@pytest.fixture(autouse=True)` with `_load_source` avoids repeating file read in every test method
+---
