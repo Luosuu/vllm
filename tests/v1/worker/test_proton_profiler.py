@@ -741,6 +741,285 @@ class TestProtonPhaseTracking:
         mock_proton.finalize.assert_called_once_with(session=42)
 
 
+@requires_proton
+class TestContiguousProfiling:
+    """Tests for contiguous profiling with periodic flushing mode.
+
+    Verifies the complete call sequences for both periodic and non-periodic
+    modes across multiple start/stop cycles, ensuring:
+    - Periodic mode uses activate/deactivate instead of start/finalize
+    - Non-periodic mode uses start/finalize per cycle (no regression)
+    - Phase number increments correctly
+    - Session reuse in periodic mode
+    - Shutdown behavior in both modes
+    """
+
+    def _make_wrapper_with_mock(self, config, output_dir="/tmp/proton_out",
+                                local_rank=0):
+        """Create a ProtonProfilerWrapper then replace _proton with a mock.
+
+        Returns (wrapper, mock_proton) tuple.
+        """
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        wrapper = ProtonProfilerWrapper(
+            profiler_config=config,
+            output_dir=output_dir,
+            local_rank=local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        wrapper._proton = mock_proton
+        return wrapper, mock_proton
+
+    def test_periodic_uses_activate_deactivate(self):
+        """Test that periodic mode uses activate/deactivate, not start/finalize."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # First cycle: start creates session, stop deactivates
+        wrapper._start()
+        wrapper._stop()
+
+        # start() called once (creates session), finalize() never called
+        mock_proton.start.assert_called_once()
+        mock_proton.finalize.assert_not_called()
+        # deactivate called with flushing=True
+        mock_proton.deactivate.assert_called_once_with(
+            session=42, flushing=True
+        )
+
+        # Second cycle: activate (not start), deactivate
+        wrapper._start()
+        mock_proton.activate.assert_called_once_with(session=42)
+        assert mock_proton.start.call_count == 1  # Still just 1
+
+        wrapper._stop()
+        assert mock_proton.deactivate.call_count == 2
+        mock_proton.finalize.assert_not_called()  # Still never called
+
+    def test_non_periodic_uses_start_finalize(self):
+        """Test that non-periodic mode uses start/finalize per cycle (no regression)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # First cycle
+        wrapper._start()
+        wrapper._stop()
+
+        mock_proton.start.assert_called_once()
+        mock_proton.finalize.assert_called_once_with(session=42)
+        # activate/deactivate should NOT be called
+        mock_proton.activate.assert_not_called()
+        mock_proton.deactivate.assert_not_called()
+
+        # Second cycle: start/finalize again
+        wrapper._start()
+        assert mock_proton.start.call_count == 2
+        wrapper._stop()
+        assert mock_proton.finalize.call_count == 2
+
+    def test_periodic_full_sequence_three_cycles(self):
+        """Test full call sequence across three periodic start/stop cycles."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Cycle 1: start creates session
+        wrapper._start()
+        wrapper._stop()
+        assert wrapper._current_phase == 1
+
+        # Cycle 2: activate reuses session
+        wrapper._start()
+        wrapper._stop()
+        assert wrapper._current_phase == 2
+
+        # Cycle 3: activate reuses session
+        wrapper._start()
+        wrapper._stop()
+        assert wrapper._current_phase == 3
+
+        # Verify call counts
+        assert mock_proton.start.call_count == 1
+        assert mock_proton.activate.call_count == 2
+        assert mock_proton.deactivate.call_count == 3
+        assert mock_proton.data.advance_phase.call_count == 3
+        mock_proton.finalize.assert_not_called()
+
+    def test_periodic_deactivate_flushing_true(self):
+        """Test that deactivate is always called with flushing=True in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        for _ in range(3):
+            wrapper._start()
+            wrapper._stop()
+
+        # All deactivate calls should have flushing=True
+        for call in mock_proton.deactivate.call_args_list:
+            assert call.kwargs["flushing"] is True
+
+    def test_periodic_session_id_persists_across_cycles(self):
+        """Test that session ID is created once and never cleared in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        assert wrapper._session_id == 42
+        wrapper._stop()
+        assert wrapper._session_id == 42  # NOT cleared
+
+        wrapper._start()
+        assert wrapper._session_id == 42
+        wrapper._stop()
+        assert wrapper._session_id == 42  # Still persists
+
+    def test_non_periodic_session_id_cleared_each_cycle(self):
+        """Test that session ID is cleared after each stop in non-periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        assert wrapper._session_id == 42
+        wrapper._stop()
+        assert wrapper._session_id is None  # Cleared
+
+    def test_shutdown_calls_finalize_periodic(self):
+        """Test that shutdown() calls finalize() in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._running = True
+        wrapper._active = True
+        wrapper.shutdown()
+
+        mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
+
+    def test_shutdown_non_periodic_stops_normally(self):
+        """Test that shutdown() in non-periodic mode calls stop (which finalizes)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._running = True
+        wrapper._active = True
+        wrapper.shutdown()
+
+        mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
+        assert wrapper._running is False
+
+    def test_get_status_periodic_mode_accuracy(self):
+        """Test get_status() returns accurate state across periodic cycles."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Initial status
+        status = wrapper.get_status()
+        assert status["active"] is False
+        assert status["current_phase"] == 0
+
+        # After first cycle
+        wrapper._start()
+        wrapper._running = True
+        status = wrapper.get_status()
+        assert status["active"] is True
+
+        wrapper._stop()
+        wrapper._running = False
+        status = wrapper.get_status()
+        assert status["active"] is False
+        assert status["current_phase"] == 1
+
+        # After second cycle
+        wrapper._start()
+        wrapper._stop()
+        status = wrapper.get_status()
+        assert status["current_phase"] == 2
+
+    def test_get_status_output_files_tracked(self):
+        """Test get_status() correctly tracks output files across cycles."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=tmpdir,
+                proton_mode="periodic_flushing",
+            )
+            wrapper, mock_proton = self._make_wrapper_with_mock(
+                config, output_dir=tmpdir
+            )
+
+            # Simulate Proton writing output files
+            for i in range(3):
+                open(os.path.join(
+                    tmpdir, f"proton_rank0.part_{i}.hatchet"
+                ), "w").close()
+
+            wrapper._start()
+            wrapper._stop()
+
+            status = wrapper.get_status()
+            assert len(status["output_files"]) == 3
+            assert status["output_dir"] == tmpdir
+
+    def test_periodic_flushing_with_format_suffix(self):
+        """Test that periodic_flushing:format=... mode string is correctly detected."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing:format=hatchet_msgpack",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        assert wrapper._periodic_mode is True
+
+        # Should use activate/deactivate pattern
+        wrapper._start()
+        wrapper._stop()
+        wrapper._start()
+
+        mock_proton.start.assert_called_once()
+        mock_proton.activate.assert_called_once_with(session=42)
+        mock_proton.deactivate.assert_called_once_with(
+            session=42, flushing=True
+        )
+
+
 class TestProtonImportGuard:
     """Test that ProtonProfilerWrapper handles missing Proton gracefully."""
 
