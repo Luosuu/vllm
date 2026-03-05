@@ -2,6 +2,10 @@
 Started: Wed Mar  5 00:00:00 UTC 2026
 
 ## Codebase Patterns
+- **nano-vllm profiler**: code is at `submodules/nano-vllm/nanovllm/profiler.py`, tests at `submodules/nano-vllm/tests/test_profiler.py`
+- **nano-vllm test isolation**: import profiler module directly via `importlib.util.spec_from_file_location()` to avoid triggering `nanovllm/__init__.py` → transformers import chain
+- **nano-vllm triton mock**: use `types.ModuleType("triton")` with `__spec__` set, not plain `MagicMock()`, or transformers import introspection crashes
+- **nano-vllm submodule commits**: commit inside `submodules/nano-vllm/` first, then commit submodule ref in parent repo
 - Profiler code lives in `vllm/profiler/wrapper.py` (implementations) and `vllm/config/profiler.py` (config)
 - `ProfilerKind` is a `Literal` type in `vllm/config/profiler.py`
 - `WorkerProfiler` is the abstract base class; subclasses implement `_start()`, `_stop()`, and `annotate_context_manager()`
@@ -193,4 +197,37 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Mode string "periodic_flushing" alone triggers a segfault in unpatched Proton — always needs the C++ fix or explicit format suffix like "periodic_flushing:format=hatchet"
   - Worker crashes from Proton segfaults show as "Worker proc died unexpectedly" in executor logs — look for "Segfault encountered" in full logs
   - Rebuilding proton: `cd submodules/triton/build/cmake.linux-x86_64-cpython-3.12 && ninja proton`
+---
+
+## 2026-03-05 - US-001 (nano-vllm)
+- Created `nanovllm/profiler.py` with ProtonProfiler class
+- ProtonProfiler supports: start(), stop(), shutdown(), get_status(), is_active()
+- Lazy import of triton.profiler — fails clearly if Proton unavailable
+- Configurable: output_dir, rank, context (shadow/python), data (tree/trace), backend (cupti/roctracer/instrumentation/auto), hook (triton/None), mode (including periodic_flushing)
+- Rank-aware output naming: proton_rank{N} with .part_{phase} suffix for periodic mode
+- Module-level get_profiler()/set_profiler() singleton functions
+- proton_scope() context manager — no-op when profiler is None or inactive
+- Periodic mode: first start() creates session, subsequent use activate()/deactivate(flushing=True)
+- Normal mode: start() creates session, stop() finalizes
+- 35 unit tests covering: initialization (5), normal lifecycle (9), periodic lifecycle (7), singleton (3), proton_scope (3), get_status (3), output naming (5)
+- Files changed: submodules/nano-vllm/nanovllm/profiler.py, submodules/nano-vllm/tests/__init__.py, submodules/nano-vllm/tests/test_profiler.py
+- **Learnings for future iterations:**
+  - nano-vllm's `__init__.py` imports the full engine stack (LLM → LLMEngine → transformers → torch) — tests must import profiler module directly via importlib.util to avoid heavy dependencies
+  - Use `importlib.util.spec_from_file_location()` + `module_from_spec()` pattern to load profiler module in isolation
+  - triton mock needs `__spec__` attribute set (via `types.ModuleType` + `ModuleSpec`) or transformers' import introspection crashes
+  - Submodule commits must be done inside `submodules/nano-vllm/` first, then the parent repo commits the submodule reference update
+---
+
+## 2026-03-05 - US-002 (nano-vllm)
+- Added `_scan_output_files()` method to scan output directory for rank-specific files
+- Wired `get_status()` to use dynamic file scanning instead of static `_output_files` list
+- Removed unused `_output_files` field — output files are now always scanned from disk
+- Added 17 new tests in 2 new test classes (52 total):
+  - `TestPeriodicFlushingSequence`: 3-cycle call sequence, flushing=True enforcement, session persistence, activate session ID, non-periodic regression, shutdown sequences, double-shutdown safety
+  - `TestPhaseTracking`: phase starts at zero, increments on stop, unchanged in normal mode, get_status phase, file scanning (empty dir, nonexistent dir, rank filtering, sort order, get_status integration)
+- Files changed: submodules/nano-vllm/nanovllm/profiler.py, submodules/nano-vllm/tests/test_profiler.py
+- **Learnings for future iterations:**
+  - `_scan_output_files()` uses `os.listdir()` + prefix filter — no glob needed since all files share a simple naming pattern
+  - Dynamic file scanning is better than maintaining a list — avoids stale state if files are written by Proton asynchronously
+  - `tmp_path` pytest fixture is ideal for testing file scanning without mocking os functions
 ---
