@@ -46,6 +46,41 @@ class ProfilerConfig:
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
 
+    proton_profiler_dir: str = ""
+    """Directory to save Proton profiler output files. Must be an absolute path
+    when profiler is 'proton'. Each rank produces its own output file in this
+    directory."""
+
+    proton_context: str = "shadow"
+    """Proton profiling context mode. Valid values:
+
+    - 'shadow': Shadow context (default) — low-overhead profiling.\n
+    - 'python': Python context — captures Python-level call stacks."""
+
+    proton_data: str = "tree"
+    """Proton output data format. Valid values:
+
+    - 'tree': Tree format (default) — produces .hatchet files.\n
+    - 'trace': Trace format — produces .chrome_trace files."""
+
+    proton_backend: str | None = None
+    """Proton profiling backend. Valid values:
+
+    - 'cupti': NVIDIA CUPTI backend.\n
+    - 'roctracer': AMD ROCTracer backend.\n
+    - 'instrumentation': Software instrumentation backend.\n
+    - None: Auto-detect backend (default)."""
+
+    proton_mode: str | None = None
+    """Proton backend-specific mode string. Free-form string passed directly
+    to the backend. Meaning varies by backend. Defaults to None."""
+
+    proton_hook: str | None = None
+    """Proton hook for capturing kernel-level events. Valid values:
+
+    - 'triton': Hook into Triton kernels.\n
+    - None: No hook (default)."""
+
     torch_profiler_with_stack: bool = False
     """If `True`, enables stack tracing in the torch profiler. Disabled by default
     to reduce overhead. Can be enabled via VLLM_TORCH_PROFILER_WITH_STACK=1 env var
