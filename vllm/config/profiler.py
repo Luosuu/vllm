@@ -160,6 +160,11 @@ class ProfilerConfig:
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
+        """Validate profiler configuration fields.
+
+        Validates torch profiler dir, proton-specific fields, and
+        delay/limit settings. Converts relative paths to absolute.
+        """
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
         if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
             logger.warning_once(
@@ -167,6 +172,7 @@ class ProfilerConfig:
                 "while ignore_frontend is False may result in high overhead."
             )
 
+        # Torch profiler dir validation
         profiler_dir = self.torch_profiler_dir
         if profiler_dir and self.profiler not in ("torch", "proton"):
             raise ValueError(
@@ -176,9 +182,62 @@ class ProfilerConfig:
         if self.profiler == "torch" and not profiler_dir:
             raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
 
-        # Support any URI scheme (gs://, s3://, hdfs://, etc.)
-        # These paths should not be converted to absolute paths
+        # Convert torch_profiler_dir to absolute path (skip URI schemes)
         if profiler_dir and not _is_uri_path(profiler_dir):
             self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
 
+        # Proton-specific validation
+        if self.profiler == "proton":
+            self._validate_proton_fields()
+
         return self
+
+    def _validate_proton_fields(self) -> None:
+        """Validate Proton-specific configuration fields.
+
+        Checks that proton_profiler_dir is set, validates enum-like fields
+        against their allowed values, and converts relative paths to absolute.
+        """
+        # proton_profiler_dir is required when profiler='proton'
+        if not self.proton_profiler_dir:
+            raise ValueError(
+                "proton_profiler_dir must be set when profiler is 'proton'"
+            )
+
+        # Convert proton_profiler_dir to absolute path (skip URI schemes)
+        if not _is_uri_path(self.proton_profiler_dir):
+            self.proton_profiler_dir = os.path.abspath(
+                os.path.expanduser(self.proton_profiler_dir)
+            )
+
+        # Validate proton_context
+        valid_contexts = ("shadow", "python")
+        if self.proton_context not in valid_contexts:
+            raise ValueError(
+                f"proton_context must be one of {valid_contexts}, "
+                f"got '{self.proton_context}'"
+            )
+
+        # Validate proton_data
+        valid_data = ("tree", "trace")
+        if self.proton_data not in valid_data:
+            raise ValueError(
+                f"proton_data must be one of {valid_data}, "
+                f"got '{self.proton_data}'"
+            )
+
+        # Validate proton_backend
+        valid_backends = ("cupti", "roctracer", "instrumentation", None)
+        if self.proton_backend not in valid_backends:
+            raise ValueError(
+                f"proton_backend must be one of {valid_backends}, "
+                f"got '{self.proton_backend}'"
+            )
+
+        # Validate proton_hook
+        valid_hooks = ("triton", None)
+        if self.proton_hook not in valid_hooks:
+            raise ValueError(
+                f"proton_hook must be one of {valid_hooks}, "
+                f"got '{self.proton_hook}'"
+            )

@@ -34,23 +34,27 @@ class TestProfilerConfigProton:
     """Tests for ProfilerConfig with profiler='proton'."""
 
     def test_proton_config_valid(self):
-        """Test that ProfilerConfig accepts profiler='proton' without errors."""
-        config = ProfilerConfig(profiler="proton")
+        """Test that ProfilerConfig accepts profiler='proton' with required dir."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
         assert config.profiler == "proton"
 
-    def test_proton_config_with_output_dir(self):
+    def test_proton_config_with_torch_profiler_dir(self):
         """Test that ProfilerConfig accepts proton with torch_profiler_dir."""
         config = ProfilerConfig(
             profiler="proton",
-            torch_profiler_dir="/tmp/proton_out",
+            proton_profiler_dir="/tmp/proton_out",
+            torch_profiler_dir="/tmp/torch_out",
         )
         assert config.profiler == "proton"
-        assert config.torch_profiler_dir == "/tmp/proton_out"
+        assert config.torch_profiler_dir == "/tmp/torch_out"
 
-    def test_proton_config_without_output_dir(self):
-        """Test that ProfilerConfig allows proton without torch_profiler_dir."""
-        config = ProfilerConfig(profiler="proton")
-        assert config.torch_profiler_dir == ""
+    def test_proton_config_without_output_dir_raises(self):
+        """Test that ProfilerConfig raises error for proton without dir."""
+        with pytest.raises(ValueError, match="proton_profiler_dir must be set"):
+            ProfilerConfig(profiler="proton")
 
     def test_torch_config_still_works(self):
         """Test that existing torch config is not broken."""
@@ -77,6 +81,7 @@ class TestProfilerConfigProton:
         """Test that proton config works with delay_iterations."""
         config = ProfilerConfig(
             profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
             delay_iterations=5,
         )
         assert config.delay_iterations == 5
@@ -85,6 +90,7 @@ class TestProfilerConfigProton:
         """Test that proton config works with max_iterations."""
         config = ProfilerConfig(
             profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
             max_iterations=10,
         )
         assert config.max_iterations == 10
@@ -99,6 +105,7 @@ class TestProtonProfilerWrapper:
         """Helper to create a ProtonProfilerWrapper with default config."""
         from vllm.profiler.wrapper import ProtonProfilerWrapper
 
+        config_kwargs.setdefault("proton_profiler_dir", output_dir)
         config = ProfilerConfig(profiler="proton", **config_kwargs)
         return ProtonProfilerWrapper(
             profiler_config=config,
@@ -229,7 +236,9 @@ class TestProtonEndToEnd:
         Proton writes .hatchet files to the configured output directory.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = ProfilerConfig(profiler="proton")
+            config = ProfilerConfig(
+                profiler="proton", proton_profiler_dir=tmpdir
+            )
 
             from vllm.profiler.wrapper import ProtonProfilerWrapper
 
@@ -260,7 +269,9 @@ class TestProtonEndToEnd:
     def test_profiling_multi_rank_output(self):
         """Test that multi-rank profiling creates rank-specific output files."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = ProfilerConfig(profiler="proton")
+            config = ProfilerConfig(
+                profiler="proton", proton_profiler_dir=tmpdir
+            )
 
             from vllm.profiler.wrapper import ProtonProfilerWrapper
 
@@ -303,7 +314,9 @@ class TestProtonImportGuard:
     def test_import_error_when_proton_not_available(self):
         """Test that ProtonProfilerWrapper raises ImportError when
         triton.profiler is not available."""
-        config = ProfilerConfig(profiler="proton")
+        config = ProfilerConfig(
+            profiler="proton", proton_profiler_dir="/tmp/test"
+        )
 
         with patch.dict("sys.modules", {"triton.profiler": None, "triton": None}):
             with pytest.raises((ImportError, ModuleNotFoundError)):

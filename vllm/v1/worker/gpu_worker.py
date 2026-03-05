@@ -788,10 +788,8 @@ class Worker(WorkerBase):
                 elif profiler_type == "proton":
                     from vllm.profiler.wrapper import ProtonProfilerWrapper
 
-                    output_dir = (
-                        self.profiler_config.torch_profiler_dir
-                        or os.getcwd()
-                    )
+                    # proton_profiler_dir is required by validation
+                    output_dir = self.profiler_config.proton_profiler_dir
                     self.profiler = ProtonProfilerWrapper(
                         self.profiler_config,
                         output_dir=output_dir,
