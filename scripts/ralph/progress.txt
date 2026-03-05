@@ -5,6 +5,8 @@ Started: Wed Mar  5 00:00:00 UTC 2026
 - **nano-vllm profiler**: code is at `submodules/nano-vllm/nanovllm/profiler.py`, tests at `submodules/nano-vllm/tests/test_profiler.py`
 - **nano-vllm test isolation**: import profiler module directly via `importlib.util.spec_from_file_location()` to avoid triggering `nanovllm/__init__.py` → transformers import chain
 - **nano-vllm triton mock**: use `types.ModuleType("triton")` with `__spec__` set, not plain `MagicMock()`, or transformers import introspection crashes
+- **nano-vllm engine test isolation**: register `nanovllm` and `nanovllm.engine` as namespace packages (with `__path__`), mock `xxhash`, stub `nanovllm.config` to avoid `transformers.AutoConfig` import chain
+- **scope annotation pattern**: split `method()` into `method()` (wraps with proton_scope) + `_method_impl()` (original logic) to avoid deep indentation
 - **nano-vllm submodule commits**: commit inside `submodules/nano-vllm/` first, then commit submodule ref in parent repo
 - Profiler code lives in `vllm/profiler/wrapper.py` (implementations) and `vllm/config/profiler.py` (config)
 - `ProfilerKind` is a `Literal` type in `vllm/config/profiler.py`
@@ -230,4 +232,49 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - `_scan_output_files()` uses `os.listdir()` + prefix filter — no glob needed since all files share a simple naming pattern
   - Dynamic file scanning is better than maintaining a list — avoids stale state if files are written by Proton asynchronously
   - `tmp_path` pytest fixture is ideal for testing file scanning without mocking os functions
+---
+
+## 2026-03-05 - US-003 (nano-vllm)
+- Added proton_scope annotations to LLMEngine.step(), Scheduler.schedule(), BlockManager.allocate(), BlockManager.deallocate()
+- LLMEngine.step() uses `proton_scope(f"LLMEngine.step/{phase}")` to distinguish prefill vs decode
+- Scheduler.schedule() refactored into schedule() + _schedule_impl() for clean scope wrapping
+- BlockManager.allocate()/deallocate() similarly split into public + _impl methods
+- All annotations import proton_scope from nanovllm.profiler — no-ops when profiler is None
+- 16 new tests in test_scope_annotations.py: BlockManager (6), Scheduler (3), LLMEngine source-level (4), scope names (3)
+- Files changed: submodules/nano-vllm/nanovllm/engine/llm_engine.py, submodules/nano-vllm/nanovllm/engine/scheduler.py, submodules/nano-vllm/nanovllm/engine/block_manager.py, submodules/nano-vllm/tests/test_scope_annotations.py
+- **Learnings for future iterations:**
+  - To test nano-vllm engine modules without heavy deps, register `nanovllm` and `nanovllm.engine` as namespace packages via `types.ModuleType` with `__path__` set, then load leaf modules via `importlib.util`
+  - Must mock `xxhash` before loading block_manager (it's a C extension dep)
+  - Config imports `transformers.AutoConfig` — use a stub module to avoid triggering the import chain
+  - The pattern of splitting `method()` into `method()` + `_method_impl()` keeps proton_scope wrapping clean without deeply indenting existing logic
+---
+
+## 2026-03-05 - US-004 (nano-vllm)
+- Added proton_scope annotations to ModelRunner: run_model(), capture_cudagraph(), warmup_model(), allocate_kv_cache()
+- run_model() distinguishes eager vs CUDA graph replay with separate scope names
+- capture_cudagraph(), warmup_model(), allocate_kv_cache() use method/impl split pattern
+- run_model() uses inline scoping (no impl split) since the two branches are separate return paths
+- CUDA graph scope wraps the entire replay path including input setup, not just graph.replay()
+- 13 new source-level verification tests in TestModelRunnerAnnotations (28 total scope tests)
+- Files changed: submodules/nano-vllm/nanovllm/engine/model_runner.py, submodules/nano-vllm/tests/test_scope_annotations.py
+- **Learnings for future iterations:**
+  - ModelRunner requires torch, CUDA, dist, model weights — use source-level verification tests like LLMEngine
+  - When searching source for patterns, beware of matches in comments (e.g., `graph.replay()` in a comment matched before the actual call)
+  - run_model() has two code paths: eager (prefill/enforce_eager/large batch) and cudagraph (decode) — each gets its own scope
+  - The method/impl split pattern isn't needed when branches already separate naturally (if/else with returns)
+---
+
+## 2026-03-05 - US-005 (nano-vllm)
+- Added proton_scope annotations to Attention.forward() with prefill/decode distinction
+- Added proton_scope annotation to store_kvcache() wrapping the Triton kernel call
+- Added proton_scope annotation to Sampler.forward() — moved @torch.compile to _forward_impl() to keep scope outside compiled code
+- Added proton_scope annotations to Qwen3Attention.forward(), Qwen3MLP.forward(), Qwen3DecoderLayer.forward()
+- Added proton_scope annotations to VocabParallelEmbedding.forward() and ParallelLMHead.forward()
+- 22 new source-level verification tests in 5 test classes (50 total scope tests), all passing
+- Files changed: submodules/nano-vllm/nanovllm/layers/attention.py, submodules/nano-vllm/nanovllm/layers/sampler.py, submodules/nano-vllm/nanovllm/layers/embed_head.py, submodules/nano-vllm/nanovllm/models/qwen3.py, submodules/nano-vllm/tests/test_scope_annotations.py
+- **Learnings for future iterations:**
+  - For Sampler: @torch.compile must stay on the impl method, not forward() — proton_scope wrapping goes in forward() which delegates to _forward_impl()
+  - Attention.forward() uses inline scope wrapping (no method/impl split) since the prefill/decode branching is naturally within the scope
+  - store_kvcache is a module-level function, not a method — scope wraps the kernel launch call inside the function
+  - All layers/models modules (attention, sampler, embed_head, qwen3) use source-level verification tests due to heavy deps (torch, CUDA, flash_attn, dist, transformers)
 ---
