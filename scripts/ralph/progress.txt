@@ -278,3 +278,18 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - store_kvcache is a module-level function, not a method — scope wraps the kernel launch call inside the function
   - All layers/models modules (attention, sampler, embed_head, qwen3) use source-level verification tests due to heavy deps (torch, CUDA, flash_attn, dist, transformers)
 ---
+
+## 2026-03-05 - US-006 (nano-vllm)
+- Created `nanovllm/profiler_cli.py` with shared CLI helpers: `add_profiler_args()`, `create_profiler_from_args()`, `print_profiler_status()`
+- Updated `bench.py` to use argparse with all --profiler and --proton-* flags
+- Profiler lifecycle: start() before timed inference, stop()/shutdown() after, print status on completion
+- CLI flags: --profiler proton, --proton-dir, --proton-context, --proton-data, --proton-backend, --proton-mode, --proton-hook
+- 32 new tests in `tests/test_profiler_cli.py`: argument parsing (14), profiler creation (7), print status (3), bench.py source verification (8)
+- All 134 tests pass (52 profiler + 50 scope + 32 CLI)
+- Files changed: submodules/nano-vllm/nanovllm/profiler_cli.py, submodules/nano-vllm/bench.py, submodules/nano-vllm/tests/test_profiler_cli.py
+- **Learnings for future iterations:**
+  - Shared `profiler_cli.py` module provides reusable argparse setup — example.py (US-007) can reuse it directly
+  - `create_profiler_from_args()` handles both profiler creation and singleton registration
+  - Backend CLI default is None (mapped to "auto" internally) to distinguish "not specified" from explicit choice
+  - Source-level verification tests work well for entry point scripts that can't be imported without heavy deps
+---
