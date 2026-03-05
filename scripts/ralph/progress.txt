@@ -305,3 +305,20 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - example.py uses `llm.generate(prompts, sampling_params)` (positional args) vs bench.py's `llm.generate(prompt_token_ids, sampling_params)` — tests must search for `llm.generate(` not specific arg patterns
   - Using `@pytest.fixture(autouse=True)` with `_load_source` avoids repeating file read in every test method
 ---
+
+## 2026-03-05 - US-008 (nano-vllm)
+- Added 29 end-to-end integration tests in `tests/test_e2e_profiling.py` (175 total)
+- Created `MockProtonWithFileOutput` — a mock Proton that writes realistic output files to disk with phase-aware naming
+- TestTreeFormatE2E (6 tests): .hatchet file creation, non-empty, valid JSON, children from scopes, rank naming, get_status
+- TestTraceFormatE2E (5 tests): .chrome_trace file creation, non-empty, valid JSON with traceEvents, scope events, get_status
+- TestPeriodicFlushingE2E (6 tests): per-phase file creation, .part_N naming, non-empty, valid JSON, phase tracking, file listing
+- TestScopeAnnotationsInOutput (4 tests): engine scopes, layer scopes, prefill/decode distinction, CUDA graph scopes in output
+- TestCLIPipeline (7 tests): full bench.py/example.py pipeline simulation (CLI args → profiler → lifecycle → file verification)
+- TestMultiRankOutput (2 tests): two-rank file separation and per-rank status filtering
+- Files changed: submodules/nano-vllm/tests/test_e2e_profiling.py
+- **Learnings for future iterations:**
+  - MockProtonWithFileOutput needs `_MockDataModule` for phase tracking — MagicMock won't track phase state correctly
+  - Phase-aware file naming: mock must increment phase on `advance_phase()` and use `.part_{phase}` suffix for phase > 0
+  - Integration tests that simulate the full CLI pipeline work well without GPU by mocking Proton's file I/O behavior
+  - The mock's `scope()` method records scope names in a list, which are then embedded in the output JSON for verification
+---
