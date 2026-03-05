@@ -23,6 +23,8 @@ Started: Wed Mar  5 00:00:00 UTC 2026
 - Environment managed by `uv`; activate with `. .venv/bin/activate`
 - For TP>1, use `--tensor-parallel-size 2` with `vllm serve`; each rank produces its own output file
 - Proton source and docs at `submodules/triton/third_party/proton`
+- **CRITICAL BUG**: Proton C++ `setPeriodicFlushingMode()` in `GPUProfiler.cpp:178` has a missing `return` — when mode is just "periodic_flushing" (no `:format=...` suffix), it falls through to access `modeAndOptions[1]` causing a segfault. Fixed by adding `return` after the default format assignment.
+- Periodic flushing design: the current phase is NEVER flushed during `deactivate()` — only _previous_ phases are flushed. So phase N's output file only appears after phase N+1's deactivate. First output file appears after second start/stop cycle.
 ---
 
 ## 2026-03-05 - US-001
@@ -171,4 +173,24 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Existing TestProtonPhaseTracking already covered some contiguous profiling scenarios — new tests focus on explicit call sequence verification
   - Use mock_proton.deactivate.call_args_list to verify all calls have flushing=True across multiple cycles
   - Non-periodic shutdown goes through stop() → _stop() → finalize() path; periodic shutdown directly calls finalize()
+---
+
+## 2026-03-05 - US-011
+- Validated contiguous profiling end-to-end with vllm serve on 2x L40S GPUs
+- Fixed Proton C++ segfault in `setPeriodicFlushingMode()` (GPUProfiler.cpp:178) — missing `return` when mode has no format suffix
+- Rebuilt libproton.so with the fix
+- Server started successfully with: `vllm serve openai/gpt-oss-20b --tensor-parallel-size 2 --profiler-config '{"profiler":"proton","proton_profiler_dir":"/tmp/proton_output","proton_mode":"periodic_flushing","proton_hook":"triton"}'`
+- Ran 3 profiling cycles (start + 3 chat completions + stop each)
+- After cycle 2: proton_rank0.part_0.hatchet (21KB) and proton_rank1.part_0.hatchet (21KB) appeared
+- After cycle 3: proton_rank0.part_1.hatchet (15KB) and proton_rank1.part_1.hatchet (15KB) appeared
+- /profile_status returned correct phase (3), output_dir, and all 4 output_files
+- Output files contain valid JSON with tree-structured profiling data (children, frame, metrics, CUDA)
+- All 60 existing tests pass, typecheck passes
+- Files changed: submodules/triton/third_party/proton/csrc/lib/Profiler/GPUProfiler.cpp, scripts/ralph/prd.json, scripts/ralph/progress.txt
+- **Learnings for future iterations:**
+  - Proton periodic flushing has a one-phase delay: current phase is never flushed, only previous phases are flushed during deactivate
+  - First output file only appears after the SECOND start/stop cycle (not the first)
+  - Mode string "periodic_flushing" alone triggers a segfault in unpatched Proton — always needs the C++ fix or explicit format suffix like "periodic_flushing:format=hatchet"
+  - Worker crashes from Proton segfaults show as "Worker proc died unexpectedly" in executor logs — look for "Segfault encountered" in full logs
+  - Rebuilding proton: `cd submodules/triton/build/cmake.linux-x86_64-cpython-3.12 && ninja proton`
 ---

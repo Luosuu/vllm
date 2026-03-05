@@ -187,8 +187,8 @@
         "Output files contain meaningful profiling data (not empty)"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~35-45s. Send chat completion requests between start/stop to generate profiling data."
+      "passes": true,
+      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~35-45s. Send chat completion requests between start/stop to generate profiling data. NOTE: Due to Proton's periodic flushing design, the current phase is never flushed — output files for phase N appear after phase N+1's deactivate. A C++ bug fix in GPUProfiler.cpp was needed for mode='periodic_flushing' without format suffix."
     }
   ]
 }
