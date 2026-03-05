@@ -19,6 +19,7 @@ Started: Wed Mar  5 00:00:00 UTC 2026
 - Start/stop profile API is pass-through: LLM → LLMEngine → EngineCore → Worker.profile() — only worker has profiler type branching
 - GPU worker has TWO places where profiler type matters: (1) early validation in `__init__` and (2) lazy instantiation in `profile()` — both must be kept in sync
 - ProtonProfilerWrapper.get_status() returns a plain dict — use this for API endpoint responses
+- New RPC methods need 5 layers: Worker → Executor → EngineCore → CoreClient (base + InprocClient + SyncMPClient + AsyncMPClient) → AsyncLLM → EngineClient protocol
 - Environment managed by `uv`; activate with `. .venv/bin/activate`
 - For TP>1, use `--tensor-parallel-size 2` with `vllm serve`; each rank produces its own output file
 - Proton source and docs at `submodules/triton/third_party/proton`
@@ -129,4 +130,20 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - _scan_output_files() filters by "proton_rank{N}" prefix to only include files for this rank
   - get_status() returns a plain dict — suitable for JSON serialization in API endpoints
   - Phase counter is local to the wrapper instance; each rank tracks its own phase independently
+---
+
+## 2026-03-05 - US-008
+- Added GET /profile_status endpoint to vllm/entrypoints/serve/profile/api_router.py
+- Added get_status() base method to WorkerProfiler (returns default dict)
+- Added profile_status() to GPUWorker to return profiler status
+- Plumbed through full chain: Executor → EngineCore → CoreClient → AsyncLLM → EngineClient protocol
+- Executor aggregates output_files from all ranks into single response
+- profiler type added at API router level from ProfilerConfig
+- EngineClient.get_profile_status() is non-abstract with default implementation (for LaunchEngineClient)
+- Files changed: vllm/entrypoints/serve/profile/api_router.py, vllm/profiler/wrapper.py, vllm/engine/protocol.py, vllm/v1/engine/async_llm.py, vllm/v1/engine/core.py, vllm/v1/engine/core_client.py, vllm/v1/executor/abstract.py, vllm/v1/worker/gpu_worker.py
+- **Learnings for future iterations:**
+  - New RPC methods need to be added at 5 layers: Worker → Executor → EngineCore → CoreClient (base + InprocClient + SyncMPClient + AsyncMPClient) → AsyncLLM → EngineClient protocol
+  - InprocClient delegates directly to EngineCore; SyncMPClient uses call_utility(); AsyncMPClient uses call_utility_async()
+  - LaunchEngineClient has no-op stubs — use non-abstract methods in protocol for graceful fallback
+  - Executor.collective_rpc() returns list[dict] (one per worker) — aggregate at executor level
 ---

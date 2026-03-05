@@ -139,7 +139,7 @@
         "Typecheck passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Look at how /start_profile and /stop_profile are implemented in api_router.py and trace the path through async_llm.py → EngineCore → Worker. The status query needs the same plumbing. Return type should be a simple dict/JSON response."
     },
     {
