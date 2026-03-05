@@ -13,8 +13,12 @@ Started: Wed Mar  5 00:00:00 UTC 2026
 - ProtonProfilerWrapper takes `output_dir` and `local_rank` params (not `worker_name` like Torch)
 - `torch_profiler_dir` is for torch profiler only; `proton_profiler_dir` is for proton profiler (fully separated)
 - Proton validation lives in `_validate_proton_fields()` helper called from main validator
+- Periodic flushing mode detected by checking `proton_mode.startswith("periodic_flushing")` — mode string may be "periodic_flushing" or "periodic_flushing:format=hatchet_msgpack"
+- In periodic mode: `_create_session()` on first `_start()`, then `activate()`/`deactivate(flushing=True)` on subsequent cycles; `finalize()` only on `shutdown()`
+- In non-periodic mode: `_create_session()` + `finalize()` on every start/stop cycle (unchanged from before)
 - Start/stop profile API is pass-through: LLM → LLMEngine → EngineCore → Worker.profile() — only worker has profiler type branching
 - GPU worker has TWO places where profiler type matters: (1) early validation in `__init__` and (2) lazy instantiation in `profile()` — both must be kept in sync
+- ProtonProfilerWrapper.get_status() returns a plain dict — use this for API endpoint responses
 - Environment managed by `uv`; activate with `. .venv/bin/activate`
 - For TP>1, use `--tensor-parallel-size 2` with `vllm serve`; each rank produces its own output file
 - Proton source and docs at `submodules/triton/third_party/proton`
@@ -93,4 +97,36 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Trace format (.chrome_trace) files are much larger than tree format (.hatchet) files
   - Server startup takes ~35-45s on 2x L40S GPUs with openai/gpt-oss-20b model
   - Chat completions endpoint works; completions endpoint may have JSON escape issues with certain shells
+---
+
+## 2026-03-05 - US-006
+- Added periodic_flushing mode to ProtonProfilerWrapper
+- Detects "periodic_flushing" prefix in proton_mode to switch lifecycle
+- Extracted _create_session() helper from _start() for reuse in both modes
+- Periodic mode: session created once on first _start(), reactivated via proton.activate() on subsequent calls
+- Periodic _stop() calls proton.deactivate(flushing=True) instead of proton.finalize()
+- Overrode shutdown() to call proton.finalize() only on shutdown in periodic mode
+- Non-periodic mode continues to work exactly as before (start/finalize per cycle)
+- All 37 existing tests pass without changes
+- Typecheck (mypy) passes
+- Files changed: vllm/profiler/wrapper.py
+- **Learnings for future iterations:**
+  - _create_session() encapsulates proton.start() with all config fields — reuse for both modes
+  - In periodic mode, proton.start() is only called once (first _start()); it both creates and activates the session
+  - shutdown() override must handle the case where profiler is still running (call _call_stop() first)
+  - The _periodic_mode flag is set in __init__ and used to branch in _start(), _stop(), and shutdown()
+---
+
+## 2026-03-05 - US-007
+- Added phase tracking to ProtonProfilerWrapper: _current_phase (int) and _output_files (list)
+- Added _scan_output_files() to scan output directory for files matching this rank
+- Added get_status() method returning dict with active, current_phase, output_dir, output_files
+- Phase advances on each _stop() in periodic mode via proton.data.advance_phase(session)
+- Added 13 new tests for phase tracking and get_status() (49 total)
+- Files changed: vllm/profiler/wrapper.py, tests/v1/worker/test_proton_profiler.py
+- **Learnings for future iterations:**
+  - proton.data.advance_phase(session) is called after deactivate() to advance to next phase
+  - _scan_output_files() filters by "proton_rank{N}" prefix to only include files for this rank
+  - get_status() returns a plain dict — suitable for JSON serialization in API endpoints
+  - Phase counter is local to the wrapper instance; each rank tracks its own phase independently
 ---

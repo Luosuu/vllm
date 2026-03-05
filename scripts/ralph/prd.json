@@ -1,7 +1,7 @@
 {
   "project": "vLLM",
   "branchName": "ralph/proton-profiler",
-  "description": "Add Proton-specific configuration fields to ProfilerConfig, mirroring Proton CLI flags through vLLM's --profiler-config interface",
+  "description": "Integrate Proton profiler into vLLM: backend, config, and contiguous profiling with periodic flushing",
   "userStories": [
     {
       "id": "US-001",
@@ -90,6 +90,105 @@
       "priority": 5,
       "passes": true,
       "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~80s. Use proton_profiler_dir instead of torch_profiler_dir for the output directory."
+    },
+    {
+      "id": "US-006",
+      "title": "Support periodic_flushing mode in ProtonProfilerWrapper",
+      "description": "As a developer, I need ProtonProfilerWrapper to support Proton's periodic_flushing mode so profiling data is automatically flushed to per-phase files during long-running sessions.",
+      "acceptanceCriteria": [
+        "Detect 'periodic_flushing' prefix in proton_mode to switch to persistent session lifecycle",
+        "Session is created once on first _start() call and reused across subsequent start/stop cycles",
+        "_start() calls proton.activate(session) in periodic mode instead of proton.start()",
+        "_stop() calls proton.deactivate(session, flushing=True) in periodic mode instead of proton.finalize()",
+        "proton.finalize() is only called on shutdown(), not on every stop",
+        "Per-phase .part_N output files are written automatically by Proton during deactivate",
+        "Non-periodic mode continues to work as before (start/finalize per cycle)",
+        "Docstrings explain both periodic and non-periodic modes",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Check for 'periodic_flushing' prefix in proton_mode (it may be 'periodic_flushing' or 'periodic_flushing:format=hatchet_msgpack'). Store a _periodic_mode bool flag in __init__. Session created lazily on first _start(). Proton API: proton.activate(session), proton.deactivate(session, flushing=True), proton.finalize(session)."
+    },
+    {
+      "id": "US-007",
+      "title": "Add phase tracking to ProtonProfilerWrapper",
+      "description": "As a developer, I need the wrapper to track phase state so the status endpoint can report profiling progress.",
+      "acceptanceCriteria": [
+        "Wrapper tracks current phase number (starts at 0, increments on each stop cycle in periodic mode)",
+        "Wrapper tracks list of output file paths generated so far",
+        "Wrapper exposes a get_status() method returning dict with: active (bool), current_phase (int), output_dir (str), output_files (list of str)",
+        "Phase advances on each _stop() call in periodic mode via proton.data.advance_phase(session)",
+        "get_status() works for both periodic and non-periodic modes",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "proton.data.advance_phase(session) returns the new phase number. Output files follow pattern: <name>.part_N.<format>. Track files by scanning proton_profiler_dir or building the list from known phase numbers and format."
+    },
+    {
+      "id": "US-008",
+      "title": "Add /profile_status API endpoint",
+      "description": "As a user, I want to query profiling status to see the current phase, which files have been written, and whether profiling is active.",
+      "acceptanceCriteria": [
+        "New GET /profile_status endpoint in vllm/entrypoints/serve/profile/api_router.py",
+        "Returns JSON with: active (bool), profiler (str), current_phase (int), output_dir (str), output_files (list of str)",
+        "Returns 200 with empty/default response when no profiler is configured",
+        "Endpoint is registered alongside existing /start_profile and /stop_profile",
+        "Status plumbed through engine/core to worker similar to start/stop profile API",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Look at how /start_profile and /stop_profile are implemented in api_router.py and trace the path through async_llm.py → EngineCore → Worker. The status query needs the same plumbing. Return type should be a simple dict/JSON response."
+    },
+    {
+      "id": "US-009",
+      "title": "Wire periodic mode through GPU worker shutdown",
+      "description": "As a developer, I need the GPU worker to call finalize() on shutdown in periodic mode to flush remaining data.",
+      "acceptanceCriteria": [
+        "GPU worker's shutdown or cleanup path calls profiler.shutdown()",
+        "ProtonProfilerWrapper.shutdown() calls proton.finalize(session) in periodic mode to flush remaining phases",
+        "Multiple start/stop cycles before shutdown produce sequential .part_N files without errors",
+        "Works correctly with multi-rank (TP > 1) — each rank produces its own .part_N files",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "The WorkerProfiler base class already has a shutdown() method that calls stop(). In periodic mode, ProtonProfilerWrapper needs to override shutdown() to also call proton.finalize(). Check gpu_worker.py for existing shutdown/cleanup hooks."
+    },
+    {
+      "id": "US-010",
+      "title": "Write tests for contiguous profiling",
+      "description": "As a developer, I need tests verifying periodic flushing mode works correctly.",
+      "acceptanceCriteria": [
+        "Unit test: periodic mode uses activate/deactivate instead of start/finalize",
+        "Unit test: non-periodic mode continues using start/finalize (no regression)",
+        "Unit test: phase number increments on each stop in periodic mode",
+        "Unit test: get_status() returns correct phase and file information",
+        "Unit test: shutdown calls finalize in periodic mode",
+        "Unit test: session is created once and reused across multiple start/stop cycles",
+        "All existing profiler tests continue to pass",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Use the _make_wrapper_with_mock() pattern from existing tests. Mock proton.activate, proton.deactivate, proton.data.advance_phase, proton.finalize. Verify call sequences across multiple start/stop cycles."
+    },
+    {
+      "id": "US-011",
+      "title": "End-to-end validation of contiguous profiling with vllm serve",
+      "description": "As a developer, I need to validate contiguous profiling works end-to-end with the vllm serve command.",
+      "acceptanceCriteria": [
+        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"proton_profiler_dir\": \"/tmp/proton_output\", \"proton_mode\": \"periodic_flushing\", \"proton_hook\": \"triton\"}' starts without errors",
+        "First /start_profile + requests + /stop_profile cycle produces .part_0 output file",
+        "Second /start_profile + requests + /stop_profile cycle produces .part_1 output file",
+        "/profile_status returns correct phase number and file list after each cycle",
+        "Output files contain meaningful profiling data (not empty)"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~35-45s. Send chat completion requests between start/stop to generate profiling data."
     }
   ]
 }
