@@ -172,7 +172,7 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Use the _make_wrapper_with_mock() pattern from existing tests. Mock proton.activate, proton.deactivate, proton.data.advance_phase, proton.finalize. Verify call sequences across multiple start/stop cycles."
     },
     {

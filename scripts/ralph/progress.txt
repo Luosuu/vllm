@@ -161,3 +161,14 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - ProtonProfilerWrapper.shutdown() handles both periodic (finalize session) and non-periodic (delegate to base stop) modes
   - When acceptance criteria are already met by prior stories, verify via tests and typecheck rather than re-implementing
 ---
+
+## 2026-03-05 - US-010
+- Added TestContiguousProfiling test class with 11 unit tests for periodic flushing mode
+- Tests verify: activate/deactivate call sequences, non-periodic regression, full 3-cycle sequence, flushing=True enforcement, session persistence, shutdown finalize, get_status accuracy, output file tracking, mode string detection with format suffix
+- Total tests: 60 (11 new), all passing. Typecheck passes.
+- Files changed: tests/v1/worker/test_proton_profiler.py
+- **Learnings for future iterations:**
+  - Existing TestProtonPhaseTracking already covered some contiguous profiling scenarios — new tests focus on explicit call sequence verification
+  - Use mock_proton.deactivate.call_args_list to verify all calls have flushing=True across multiple cycles
+  - Non-periodic shutdown goes through stop() → _stop() → finalize() path; periodic shutdown directly calls finalize()
+---
