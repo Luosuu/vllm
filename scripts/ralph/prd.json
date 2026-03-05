@@ -1,194 +1,157 @@
 {
-  "project": "vLLM",
-  "branchName": "ralph/proton-profiler",
-  "description": "Integrate Proton profiler into vLLM: backend, config, and contiguous profiling with periodic flushing",
+  "project": "nano-vllm-proton",
+  "branchName": "ralph/nano-vllm-proton",
+  "description": "Add independent Proton profiler integration to nano-vllm submodule for kernel-level GPU profiling and side-by-side comparison with vLLM",
+  "instructions": [
+    "All changes go inside the submodules/nano-vllm/ directory — do NOT modify vLLM code",
+    "Make clear and simple code design for ease of understanding",
+    "Write docstring and inline comments for every method",
+    "Write comprehensive tests for every function: unit tests, integration tests, smoke tests",
+    "Only write absolutely necessary code, avoid redundant code, keep codebase clean",
+    "Avoid fallbacks and try-catch — fail early to discover issues at the shallow surface",
+    "Python environment is managed by uv. Run `. .venv/bin/activate` and use `uv pip install ...`",
+    "Do not include claude as co-author in commit message",
+    "Do not include US-00X in commit message, follow vLLM commit message style",
+    "nano-vllm profiler is fully independent — no vLLM imports or dependencies",
+    "Use module-level singleton pattern (get_profiler/set_profiler) for global profiler access",
+    "When profiler is not active, annotations must be no-ops with zero overhead"
+  ],
   "userStories": [
     {
       "id": "US-001",
-      "title": "Add Proton config fields to ProfilerConfig",
-      "description": "As a developer, I need Proton-specific fields in ProfilerConfig so users can configure Proton through --profiler-config JSON.",
+      "title": "Proton profiler module with basic start/stop lifecycle",
+      "description": "As a developer, I want a self-contained Proton profiler module in nano-vllm so that I can start/stop profiling sessions and collect GPU traces.",
       "acceptanceCriteria": [
-        "ProfilerConfig in vllm/config/profiler.py has field proton_profiler_dir: str (default '')",
-        "ProfilerConfig has field proton_context: str — 'shadow' or 'python' (default 'shadow')",
-        "ProfilerConfig has field proton_data: str — 'tree' or 'trace' (default 'tree')",
-        "ProfilerConfig has field proton_backend: str | None — 'cupti', 'roctracer', 'instrumentation', or None (default None)",
-        "ProfilerConfig has field proton_mode: str | None — free-form backend-specific string (default None)",
-        "ProfilerConfig has field proton_hook: str | None — 'triton' or None (default None)",
-        "All fields have docstrings explaining valid values",
-        "Existing torch/cuda config fields are unchanged",
-        "Typecheck passes"
+        "New file nanovllm/profiler.py with a ProtonProfiler class",
+        "ProtonProfiler supports start(), stop(), shutdown(), get_status() methods",
+        "Lazy import of triton.profiler — fails clearly if Proton is unavailable",
+        "Configurable output directory, context (shadow/python), data format (tree/trace), backend (cupti/roctracer/instrumentation/auto), hook (triton/None), and mode (including periodic_flushing)",
+        "Rank-aware output file naming (proton_rank{N}.hatchet or .chrome_trace)",
+        "Module-level get_profiler() and set_profiler() singleton functions",
+        "A proton_scope() context manager helper that is a no-op when profiler is None",
+        "Unit tests for initialization, start/stop lifecycle, config validation, and singleton access",
+        "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Follow the torch_profiler_* naming pattern but with proton_ prefix. Refer to Proton CLI flags: -n/--name, -b/--backend, -c/--context, -m/--mode, -d/--data, -k/--hook. Proton source at submodules/triton/third_party/proton."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Add validation for Proton config fields",
-      "description": "As a developer, I need the config to validate Proton fields so users get clear errors for invalid values.",
+      "title": "Periodic flushing and phase tracking",
+      "description": "As a developer, I want periodic flushing support so that I can profile multiple intervals in a single session without unbounded memory growth.",
       "acceptanceCriteria": [
-        "When profiler='proton', proton_profiler_dir must be set (non-empty) — raises validation error otherwise",
-        "proton_context is validated to be 'shadow' or 'python'",
-        "proton_data is validated to be 'tree' or 'trace'",
-        "proton_backend is validated to be 'cupti', 'roctracer', 'instrumentation', or None",
-        "proton_hook is validated to be 'triton' or None",
-        "proton_mode accepts any string without validation (backend-dependent)",
-        "proton_profiler_dir is converted to absolute path (same URI scheme handling as torch_profiler_dir)",
-        "Validation errors produce clear messages indicating valid options",
-        "Typecheck passes"
+        "When mode starts with periodic_flushing, session persists across start/stop cycles",
+        "First start() creates session via proton.start(), subsequent calls use proton.activate()",
+        "stop() calls proton.deactivate(flushing=True) and advances phase via proton.data.advance_phase()",
+        "shutdown() calls proton.finalize() to close the persistent session",
+        "get_status() returns current phase number, output directory, and list of output files",
+        "Per-phase output files: proton_rank{N}.part_{phase}.hatchet",
+        "Unit tests for multi-cycle periodic flushing sequences and phase tracking",
+        "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Add validation in the existing @model_validator(mode='after') method. Follow the same pattern as torch_profiler_dir validation."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Wire Proton config into ProtonProfilerWrapper",
-      "description": "As a developer, I need ProtonProfilerWrapper to read the new config fields and pass them to proton.start().",
+      "title": "Scope annotations for engine and scheduler",
+      "description": "As a developer, I want Proton scope annotations on engine and scheduler operations so that profiling output shows scheduling and orchestration time.",
       "acceptanceCriteria": [
-        "ProtonProfilerWrapper.__init__() reads all 6 Proton config fields from ProfilerConfig",
-        "_start() calls proton.start(name=..., context=..., data=..., backend=..., mode=..., hook=...)",
-        "Output file is written to proton_profiler_dir",
-        "Existing scheduling via delay_iterations, max_iterations, warmup_iterations, active_iterations, wait_iterations continues to work",
-        "Docstrings and inline comments explain each parameter mapping",
-        "Typecheck passes"
+        "LLMEngine.step() annotated with scope distinguishing prefill vs decode phase",
+        "Scheduler.schedule() annotated",
+        "BlockManager.allocate() and BlockManager.deallocate() annotated",
+        "Annotations use the proton_scope() helper from US-001 — no-ops when profiler is None",
+        "Unit tests verifying scope annotations are applied correctly",
+        "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "ProtonProfilerWrapper already exists in vllm/profiler/wrapper.py. Update it to use the new config fields instead of hardcoded defaults. GPU worker profile() method in vllm/v1/worker/gpu_worker.py may need updating to pass new config fields."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Write tests for Proton config validation and wiring",
-      "description": "As a developer, I need tests that verify Proton config fields are validated and wired correctly.",
+      "title": "Scope annotations for model runner and CUDA graphs",
+      "description": "As a developer, I want Proton scope annotations on model runner operations so that profiling output shows GPU execution and CUDA graph overhead.",
       "acceptanceCriteria": [
-        "Unit test: ProfilerConfig(profiler='proton', proton_profiler_dir='/tmp/proton') creates valid config",
-        "Unit test: ProfilerConfig(profiler='proton') without proton_profiler_dir raises validation error",
-        "Unit test: invalid proton_context value raises validation error",
-        "Unit test: invalid proton_data value raises validation error",
-        "Unit test: invalid proton_backend value raises validation error",
-        "Unit test: invalid proton_hook value raises validation error",
-        "Unit test: proton_mode accepts arbitrary strings without error",
-        "Integration test: Proton config fields are correctly passed to proton.start() arguments",
-        "All existing profiler config tests continue to pass",
+        "ModelRunner.run_model() annotated (distinguish eager vs CUDA graph replay)",
+        "ModelRunner.capture_cudagraph() annotated",
+        "ModelRunner.warmup_model() and ModelRunner.allocate_kv_cache() annotated",
+        "Annotations placed outside CUDA graph replay calls to avoid interference",
+        "Unit tests verifying scope annotations are applied correctly",
         "Tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Existing test file at tests/v1/worker/test_proton_profiler.py. Add config validation tests there or in a new test file."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "End-to-end validation with proton config options",
-      "description": "As a developer, I need to validate that Proton config options work end-to-end with vllm serve.",
+      "title": "Scope annotations for attention, layers, and sampler",
+      "description": "As a developer, I want Proton scope annotations on individual model layers so that profiling output shows per-layer GPU time breakdown.",
       "acceptanceCriteria": [
-        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"proton_profiler_dir\": \"/tmp/proton_output\", \"proton_context\": \"shadow\", \"proton_data\": \"tree\", \"proton_hook\": \"triton\"}' starts without errors",
-        "Triggering /start_profile and /stop_profile produces profiling output in /tmp/proton_output",
-        "Output format matches proton_data setting (tree produces .hatchet file, trace produces .chrome_trace file)",
-        "Changing proton_context to 'python' produces Python-context profiling data"
+        "Attention.forward() annotated (distinguish prefill attention vs decode attention)",
+        "store_kvcache_kernel Triton kernel execution annotated",
+        "Sampler.forward() annotated",
+        "Qwen3DecoderLayer, Qwen3Attention, and Qwen3MLP forward() methods annotated",
+        "VocabParallelEmbedding.forward() and ParallelLMHead.forward() annotated",
+        "Unit tests verifying scope annotations are applied correctly",
+        "Tests pass"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~80s. Use proton_profiler_dir instead of torch_profiler_dir for the output directory."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Support periodic_flushing mode in ProtonProfilerWrapper",
-      "description": "As a developer, I need ProtonProfilerWrapper to support Proton's periodic_flushing mode so profiling data is automatically flushed to per-phase files during long-running sessions.",
+      "title": "CLI integration for bench.py",
+      "description": "As a developer, I want CLI flags on bench.py so that I can run profiled benchmarks from the command line.",
       "acceptanceCriteria": [
-        "Detect 'periodic_flushing' prefix in proton_mode to switch to persistent session lifecycle",
-        "Session is created once on first _start() call and reused across subsequent start/stop cycles",
-        "_start() calls proton.activate(session) in periodic mode instead of proton.start()",
-        "_stop() calls proton.deactivate(session, flushing=True) in periodic mode instead of proton.finalize()",
-        "proton.finalize() is only called on shutdown(), not on every stop",
-        "Per-phase .part_N output files are written automatically by Proton during deactivate",
-        "Non-periodic mode continues to work as before (start/finalize per cycle)",
-        "Docstrings explain both periodic and non-periodic modes",
-        "Typecheck passes"
+        "--profiler proton flag enables Proton profiling for the benchmark run",
+        "--proton-dir <path> sets the output directory (required when --profiler proton)",
+        "--proton-context {shadow,python} sets context mode (default: shadow)",
+        "--proton-data {tree,trace} sets output format (default: tree)",
+        "--proton-backend {cupti,roctracer,instrumentation} sets GPU backend (default: auto)",
+        "--proton-mode <string> sets mode (e.g., periodic_flushing)",
+        "--proton-hook {triton} sets kernel hook (default: None)",
+        "Profiler starts before inference, stops after, and prints output file paths on completion",
+        "Smoke test: python bench.py --profiler proton --proton-dir /tmp/proton_out runs without error",
+        "Tests pass"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Check for 'periodic_flushing' prefix in proton_mode (it may be 'periodic_flushing' or 'periodic_flushing:format=hatchet_msgpack'). Store a _periodic_mode bool flag in __init__. Session created lazily on first _start(). Proton API: proton.activate(session), proton.deactivate(session, flushing=True), proton.finalize(session)."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Add phase tracking to ProtonProfilerWrapper",
-      "description": "As a developer, I need the wrapper to track phase state so the status endpoint can report profiling progress.",
+      "title": "CLI integration for example.py",
+      "description": "As a developer, I want CLI flags on example.py so that I can profile example inference runs.",
       "acceptanceCriteria": [
-        "Wrapper tracks current phase number (starts at 0, increments on each stop cycle in periodic mode)",
-        "Wrapper tracks list of output file paths generated so far",
-        "Wrapper exposes a get_status() method returning dict with: active (bool), current_phase (int), output_dir (str), output_files (list of str)",
-        "Phase advances on each _stop() call in periodic mode via proton.data.advance_phase(session)",
-        "get_status() works for both periodic and non-periodic modes",
-        "Typecheck passes"
+        "Same --profiler and --proton-* CLI flags as bench.py added to example.py",
+        "Profiler lifecycle managed around the generate() call",
+        "Reuse argparse flag setup from bench.py via shared helper if possible",
+        "Smoke test: python example.py --profiler proton --proton-dir /tmp/proton_out runs without error",
+        "Tests pass"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "proton.data.advance_phase(session) returns the new phase number. Output files follow pattern: <name>.part_N.<format>. Track files by scanning proton_profiler_dir or building the list from known phase numbers and format."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Add /profile_status API endpoint",
-      "description": "As a user, I want to query profiling status to see the current phase, which files have been written, and whether profiling is active.",
+      "title": "End-to-end profiling validation",
+      "description": "As a developer, I want to verify that Proton profiling produces valid output files from nano-vllm inference.",
       "acceptanceCriteria": [
-        "New GET /profile_status endpoint in vllm/entrypoints/serve/profile/api_router.py",
-        "Returns JSON with: active (bool), profiler (str), current_phase (int), output_dir (str), output_files (list of str)",
-        "Returns 200 with empty/default response when no profiler is configured",
-        "Endpoint is registered alongside existing /start_profile and /stop_profile",
-        "Status plumbed through engine/core to worker similar to start/stop profile API",
-        "Typecheck passes"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": "Look at how /start_profile and /stop_profile are implemented in api_router.py and trace the path through async_llm.py → EngineCore → Worker. The status query needs the same plumbing. Return type should be a simple dict/JSON response."
-    },
-    {
-      "id": "US-009",
-      "title": "Wire periodic mode through GPU worker shutdown",
-      "description": "As a developer, I need the GPU worker to call finalize() on shutdown in periodic mode to flush remaining data.",
-      "acceptanceCriteria": [
-        "GPU worker's shutdown or cleanup path calls profiler.shutdown()",
-        "ProtonProfilerWrapper.shutdown() calls proton.finalize(session) in periodic mode to flush remaining phases",
-        "Multiple start/stop cycles before shutdown produce sequential .part_N files without errors",
-        "Works correctly with multi-rank (TP > 1) — each rank produces its own .part_N files",
-        "Typecheck passes"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "The WorkerProfiler base class already has a shutdown() method that calls stop(). In periodic mode, ProtonProfilerWrapper needs to override shutdown() to also call proton.finalize(). Check gpu_worker.py for existing shutdown/cleanup hooks."
-    },
-    {
-      "id": "US-010",
-      "title": "Write tests for contiguous profiling",
-      "description": "As a developer, I need tests verifying periodic flushing mode works correctly.",
-      "acceptanceCriteria": [
-        "Unit test: periodic mode uses activate/deactivate instead of start/finalize",
-        "Unit test: non-periodic mode continues using start/finalize (no regression)",
-        "Unit test: phase number increments on each stop in periodic mode",
-        "Unit test: get_status() returns correct phase and file information",
-        "Unit test: shutdown calls finalize in periodic mode",
-        "Unit test: session is created once and reused across multiple start/stop cycles",
-        "All existing profiler tests continue to pass",
+        "Integration test that runs bench.py with --profiler proton --proton-data tree and verifies .hatchet output files exist and are non-empty",
+        "Integration test for --proton-data trace verifying .chrome_trace output files",
+        "Integration test for periodic flushing mode verifying per-phase .part_N.hatchet files",
+        "Output files contain annotated scopes (verified by checking file content or proton-viewer)",
         "Tests pass"
       ],
-      "priority": 10,
-      "passes": true,
-      "notes": "Use the _make_wrapper_with_mock() pattern from existing tests. Mock proton.activate, proton.deactivate, proton.data.advance_phase, proton.finalize. Verify call sequences across multiple start/stop cycles."
-    },
-    {
-      "id": "US-011",
-      "title": "End-to-end validation of contiguous profiling with vllm serve",
-      "description": "As a developer, I need to validate contiguous profiling works end-to-end with the vllm serve command.",
-      "acceptanceCriteria": [
-        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"proton_profiler_dir\": \"/tmp/proton_output\", \"proton_mode\": \"periodic_flushing\", \"proton_hook\": \"triton\"}' starts without errors",
-        "First /start_profile + requests + /stop_profile cycle produces .part_0 output file",
-        "Second /start_profile + requests + /stop_profile cycle produces .part_1 output file",
-        "/profile_status returns correct phase number and file list after each cycle",
-        "Output files contain meaningful profiling data (not empty)"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~35-45s. Send chat completion requests between start/stop to generate profiling data. NOTE: Due to Proton's periodic flushing design, the current phase is never flushed — output files for phase N appear after phase N+1's deactivate. A C++ bug fix in GPUProfiler.cpp was needed for mode='periodic_flushing' without format suffix."
+      "priority": 8,
+      "passes": false,
+      "notes": ""
     }
   ]
 }
