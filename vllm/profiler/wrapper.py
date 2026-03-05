@@ -309,6 +309,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
     ) -> None:
         """Initialize the Proton profiler wrapper.
 
+        Reads all Proton-specific config fields from ProfilerConfig and
+        stores them for use in _start(). Each field maps to a proton.start()
+        parameter.
+
         Args:
             profiler_config: The profiler configuration.
             output_dir: Directory to write profiling output files.
@@ -325,6 +329,18 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._local_rank = local_rank
         self._session_id: int | None = None
 
+        # Proton config fields — map to proton.start() parameters:
+        #   proton_context  -> context ("shadow" or "python")
+        #   proton_data     -> data ("tree" or "trace")
+        #   proton_backend  -> backend ("cupti", "roctracer", "instrumentation", None)
+        #   proton_mode     -> mode (free-form backend-specific string)
+        #   proton_hook     -> hook ("triton" or None)
+        self._context = profiler_config.proton_context
+        self._data = profiler_config.proton_data
+        self._backend = profiler_config.proton_backend
+        self._mode = profiler_config.proton_mode
+        self._hook = profiler_config.proton_hook
+
         if local_rank in (None, 0):
             logger.info_once(
                 "Proton profiling enabled. Output will be saved to: %s",
@@ -334,14 +350,29 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
-        """Start a Proton profiling session."""
+        """Start a Proton profiling session.
+
+        Passes all config fields to proton.start():
+          - name: output path (output_dir/proton_rank{rank})
+          - context: profiling context mode (shadow/python)
+          - data: output format (tree/trace)
+          - backend: profiling backend (cupti/roctracer/instrumentation/None)
+          - mode: backend-specific mode string
+          - hook: kernel hook (triton/None)
+        """
         import os
 
+        # Output file is written to proton_profiler_dir with rank suffix
         output_path = os.path.join(
             self._output_dir, f"proton_rank{self._local_rank}"
         )
         self._session_id = self._proton.start(
-            name=output_path, hook="triton"
+            name=output_path,
+            context=self._context,
+            data=self._data,
+            backend=self._backend,
+            mode=self._mode,
+            hook=self._hook,
         )
 
     @override
