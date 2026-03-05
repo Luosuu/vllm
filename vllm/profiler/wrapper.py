@@ -299,6 +299,15 @@ class ProtonProfilerWrapper(WorkerProfiler):
     Proton profiles Triton kernels and GPU activity, writing output
     in .hatchet format. The triton.profiler module is lazily imported
     to avoid errors when Triton is not installed.
+
+    Supports two modes:
+      - **Non-periodic (default):** Each start/stop cycle creates a new
+        session via proton.start() and finalizes it via proton.finalize().
+      - **Periodic flushing:** Enabled when proton_mode starts with
+        "periodic_flushing". A single session is created on the first
+        _start() call and reused across subsequent cycles. _start() calls
+        proton.activate(), _stop() calls proton.deactivate(flushing=True),
+        and proton.finalize() is only called on shutdown().
     """
 
     def __init__(
@@ -312,6 +321,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
         Reads all Proton-specific config fields from ProfilerConfig and
         stores them for use in _start(). Each field maps to a proton.start()
         parameter.
+
+        If proton_mode starts with "periodic_flushing", the wrapper switches
+        to persistent session lifecycle where activate/deactivate are used
+        instead of start/finalize per cycle.
 
         Args:
             profiler_config: The profiler configuration.
@@ -341,24 +354,29 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._mode = profiler_config.proton_mode
         self._hook = profiler_config.proton_hook
 
+        # Detect periodic flushing mode from proton_mode prefix.
+        # proton_mode may be "periodic_flushing" or
+        # "periodic_flushing:format=hatchet_msgpack" etc.
+        self._periodic_mode = (
+            self._mode is not None
+            and self._mode.startswith("periodic_flushing")
+        )
+
         if local_rank in (None, 0):
+            mode_label = "periodic" if self._periodic_mode else "non-periodic"
             logger.info_once(
-                "Proton profiling enabled. Output will be saved to: %s",
+                "Proton profiling enabled (%s mode). "
+                "Output will be saved to: %s",
+                mode_label,
                 output_dir,
                 scope="local",
             )
 
-    @override
-    def _start(self) -> None:
-        """Start a Proton profiling session.
+    def _create_session(self) -> int:
+        """Create a new Proton profiling session via proton.start().
 
-        Passes all config fields to proton.start():
-          - name: output path (output_dir/proton_rank{rank})
-          - context: profiling context mode (shadow/python)
-          - data: output format (tree/trace)
-          - backend: profiling backend (cupti/roctracer/instrumentation/None)
-          - mode: backend-specific mode string
-          - hook: kernel hook (triton/None)
+        Returns:
+            The session ID from proton.start().
         """
         import os
 
@@ -366,7 +384,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
         output_path = os.path.join(
             self._output_dir, f"proton_rank{self._local_rank}"
         )
-        self._session_id = self._proton.start(
+        return self._proton.start(
             name=output_path,
             context=self._context,
             data=self._data,
@@ -376,10 +394,67 @@ class ProtonProfilerWrapper(WorkerProfiler):
         )
 
     @override
+    def _start(self) -> None:
+        """Start or reactivate a Proton profiling session.
+
+        Non-periodic mode: Creates a new session via proton.start().
+        Periodic mode: Creates a session on the first call, then
+        reactivates the existing session via proton.activate() on
+        subsequent calls.
+        """
+        if self._periodic_mode:
+            if self._session_id is None:
+                # First call — create the session (proton.start activates it)
+                self._session_id = self._create_session()
+            else:
+                # Subsequent calls — reactivate existing session
+                self._proton.activate(session=self._session_id)
+        else:
+            # Non-periodic: create a new session each cycle
+            self._session_id = self._create_session()
+
+    @override
     def _stop(self) -> None:
-        """Finalize the Proton profiling session and write output."""
-        self._proton.finalize(session=self._session_id)
-        self._session_id = None
+        """Stop or deactivate the Proton profiling session.
+
+        Non-periodic mode: Finalizes the session and writes output.
+        Periodic mode: Deactivates the session with flushing=True to
+        write per-phase .part_N output files. The session is preserved
+        for reuse; finalize() is only called on shutdown().
+        """
+        if self._periodic_mode:
+            # Deactivate with flushing to write per-phase output
+            self._proton.deactivate(
+                session=self._session_id, flushing=True
+            )
+            # Session is preserved — not cleared
+        else:
+            # Non-periodic: finalize and clear session
+            self._proton.finalize(session=self._session_id)
+            self._session_id = None
+
+    @override
+    def shutdown(self) -> None:
+        """Shut down the profiler, finalizing any persistent session.
+
+        In periodic mode, this calls proton.finalize() to flush any
+        remaining profiling data. In non-periodic mode, delegates to
+        the base class which calls stop().
+        """
+        logger.info_once("Shutting down profiler", scope="local")
+        if self._periodic_mode and self._session_id is not None:
+            # Stop if still running, then finalize the persistent session
+            if self._running:
+                self._active = False
+                self._active_iteration_count = 0
+                self._profiling_for_iters = 0
+                self._call_stop()
+            self._proton.finalize(session=self._session_id)
+            self._session_id = None
+        else:
+            # Non-periodic: base class stop() handles finalize
+            if self._running:
+                self.stop()
 
     @override
     def annotate_context_manager(self, name: str):
