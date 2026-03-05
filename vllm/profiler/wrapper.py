@@ -362,6 +362,12 @@ class ProtonProfilerWrapper(WorkerProfiler):
             and self._mode.startswith("periodic_flushing")
         )
 
+        # Phase tracking for periodic mode status reporting.
+        # _current_phase starts at 0, increments on each _stop() in periodic mode.
+        # _output_files tracks paths of generated output files.
+        self._current_phase: int = 0
+        self._output_files: list[str] = []
+
         if local_rank in (None, 0):
             mode_label = "periodic" if self._periodic_mode else "non-periodic"
             logger.info_once(
@@ -427,11 +433,50 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._proton.deactivate(
                 session=self._session_id, flushing=True
             )
+            # Advance phase counter and collect output file path
+            self._proton.data.advance_phase(session=self._session_id)
+            self._scan_output_files()
+            self._current_phase += 1
             # Session is preserved — not cleared
         else:
             # Non-periodic: finalize and clear session
             self._proton.finalize(session=self._session_id)
+            self._scan_output_files()
             self._session_id = None
+
+    def _scan_output_files(self) -> None:
+        """Scan proton_profiler_dir for output files matching this rank.
+
+        Updates _output_files with any new files found. Files are
+        identified by the "proton_rank{N}" prefix in the output directory.
+        """
+        import os
+
+        if not os.path.isdir(self._output_dir):
+            return
+        prefix = f"proton_rank{self._local_rank}"
+        current_files = sorted(
+            os.path.join(self._output_dir, f)
+            for f in os.listdir(self._output_dir)
+            if f.startswith(prefix)
+        )
+        self._output_files = current_files
+
+    def get_status(self) -> dict:
+        """Return current profiling status for status endpoint reporting.
+
+        Returns a dict with:
+            - active: Whether the profiler is currently running.
+            - current_phase: Current phase number (periodic mode).
+            - output_dir: Directory where output files are written.
+            - output_files: List of output file paths generated so far.
+        """
+        return {
+            "active": self._running,
+            "current_phase": self._current_phase,
+            "output_dir": self._output_dir,
+            "output_files": list(self._output_files),
+        }
 
     @override
     def shutdown(self) -> None:

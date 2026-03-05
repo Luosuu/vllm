@@ -514,6 +514,233 @@ class TestProtonConfigWiring:
         assert wrapper._session_id is None
 
 
+@requires_proton
+class TestProtonPhaseTracking:
+    """Tests for phase tracking and get_status() in ProtonProfilerWrapper."""
+
+    def _make_wrapper_with_mock(self, config, output_dir="/tmp/proton_out",
+                                local_rank=0):
+        """Create a ProtonProfilerWrapper then replace _proton with a mock.
+
+        Returns (wrapper, mock_proton) tuple.
+        """
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        wrapper = ProtonProfilerWrapper(
+            profiler_config=config,
+            output_dir=output_dir,
+            local_rank=local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        wrapper._proton = mock_proton
+        return wrapper, mock_proton
+
+    def test_phase_increments_on_stop_periodic(self):
+        """Test that phase number increments on each _stop() in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # First start/stop cycle
+        wrapper._start()
+        assert wrapper._current_phase == 0
+        wrapper._stop()
+        assert wrapper._current_phase == 1
+
+        # Second start/stop cycle
+        wrapper._start()
+        wrapper._stop()
+        assert wrapper._current_phase == 2
+
+    def test_phase_does_not_increment_non_periodic(self):
+        """Test that phase number stays at 0 in non-periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._stop()
+        assert wrapper._current_phase == 0
+
+    def test_advance_phase_called_in_periodic_mode(self):
+        """Test that proton.data.advance_phase() is called on _stop() in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._stop()
+
+        mock_proton.data.advance_phase.assert_called_once_with(session=42)
+
+    def test_advance_phase_not_called_non_periodic(self):
+        """Test that proton.data.advance_phase() is NOT called in non-periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._stop()
+
+        mock_proton.data.advance_phase.assert_not_called()
+
+    def test_get_status_initial(self):
+        """Test get_status() returns correct initial state."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, _ = self._make_wrapper_with_mock(config)
+
+        status = wrapper.get_status()
+        assert status["active"] is False
+        assert status["current_phase"] == 0
+        assert status["output_dir"] == "/tmp/proton_out"
+        assert status["output_files"] == []
+
+    def test_get_status_while_running(self):
+        """Test get_status() returns active=True while profiler is running."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, _ = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._running = True  # Simulate base class setting this
+
+        status = wrapper.get_status()
+        assert status["active"] is True
+        assert status["current_phase"] == 0
+
+    def test_get_status_after_periodic_cycles(self):
+        """Test get_status() returns correct phase after multiple cycles."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, _ = self._make_wrapper_with_mock(config)
+
+        # Run three start/stop cycles
+        for _ in range(3):
+            wrapper._start()
+            wrapper._stop()
+
+        status = wrapper.get_status()
+        assert status["active"] is False
+        assert status["current_phase"] == 3
+
+    def test_get_status_output_files_periodic(self):
+        """Test get_status() tracks output files in periodic mode."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=tmpdir,
+                proton_mode="periodic_flushing",
+            )
+            wrapper, _ = self._make_wrapper_with_mock(config, output_dir=tmpdir)
+
+            # Create fake output files to simulate Proton writing them
+            for i in range(2):
+                open(os.path.join(tmpdir, f"proton_rank0.part_{i}.hatchet"), "w").close()
+
+            wrapper._start()
+            wrapper._stop()
+
+            status = wrapper.get_status()
+            assert len(status["output_files"]) == 2
+            assert all("proton_rank0" in f for f in status["output_files"])
+
+    def test_get_status_output_files_non_periodic(self):
+        """Test get_status() tracks output files in non-periodic mode."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=tmpdir,
+            )
+            wrapper, _ = self._make_wrapper_with_mock(config, output_dir=tmpdir)
+
+            # Create fake output file
+            open(os.path.join(tmpdir, "proton_rank0.hatchet"), "w").close()
+
+            wrapper._start()
+            wrapper._stop()
+
+            status = wrapper.get_status()
+            assert len(status["output_files"]) == 1
+
+    def test_get_status_multi_rank_filters_by_rank(self):
+        """Test that get_status() only includes files for this rank."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=tmpdir,
+            )
+            wrapper, _ = self._make_wrapper_with_mock(
+                config, output_dir=tmpdir, local_rank=1
+            )
+
+            # Create files for both ranks
+            open(os.path.join(tmpdir, "proton_rank0.hatchet"), "w").close()
+            open(os.path.join(tmpdir, "proton_rank1.hatchet"), "w").close()
+
+            wrapper._start()
+            wrapper._stop()
+
+            status = wrapper.get_status()
+            assert len(status["output_files"]) == 1
+            assert "proton_rank1" in status["output_files"][0]
+
+    def test_session_reused_across_periodic_cycles(self):
+        """Test that session is created once and reused in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # First cycle creates session
+        wrapper._start()
+        assert mock_proton.start.call_count == 1
+        wrapper._stop()
+
+        # Second cycle reuses session (activate, not start)
+        wrapper._start()
+        assert mock_proton.start.call_count == 1  # Still 1
+        mock_proton.activate.assert_called_once_with(session=42)
+        wrapper._stop()
+
+    def test_shutdown_calls_finalize_periodic(self):
+        """Test that shutdown() calls finalize() in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._running = True
+        wrapper._active = True
+        wrapper.shutdown()
+
+        mock_proton.finalize.assert_called_once_with(session=42)
+
+
 class TestProtonImportGuard:
     """Test that ProtonProfilerWrapper handles missing Proton gracefully."""
 
