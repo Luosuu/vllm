@@ -375,6 +375,12 @@ class ProtonProfilerWrapper(WorkerProfiler):
             and self._mode.startswith("periodic_flushing")
         )
 
+        # Normalize bare "periodic_flushing" to include explicit format.
+        # Proton's C++ code segfaults on bare "periodic_flushing" without
+        # a format suffix (out-of-bounds access in setPeriodicFlushingMode).
+        if self._mode == "periodic_flushing":
+            self._mode = "periodic_flushing:format=hatchet"
+
         # Phase tracking for periodic mode status reporting.
         # _current_phase starts at 0, increments on each _stop() in periodic mode.
         # _output_files tracks paths of generated output files.

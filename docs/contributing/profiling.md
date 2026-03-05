@@ -81,6 +81,158 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+## Profile with Triton Proton Profiler
+
+[Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton) is the built-in profiler in Triton. It provides Triton-kernel-level profiling with GPU activity tracing, and is available wherever Triton is installed (which includes standard PyTorch installations).
+
+### Architecture
+
+Proton is integrated into vLLM as a profiler backend alongside `torch` and `cuda`. The implementation lives in two files:
+
+- `vllm/config/profiler.py` — `ProfilerConfig` with `proton_*` configuration fields
+- `vllm/profiler/wrapper.py` — `ProtonProfilerWrapper` extending `WorkerProfiler`
+
+The wrapper supports two lifecycle modes:
+
+- **Non-periodic (default):** Each `/start_profile` → `/stop_profile` cycle creates a new Proton session via `proton.start()` and finalizes it via `proton.finalize()`. Simple and self-contained.
+- **Periodic flushing:** Enabled by setting `proton_mode` to `"periodic_flushing"`. A single session is created on the first start and persists across cycles. Subsequent starts call `proton.activate()`, stops call `proton.deactivate(flushing=True)`, and `proton.finalize()` is only called on server shutdown. Per-phase output files (`.part_N`) are written automatically, enabling memory-bounded long-running profiling.
+
+### Configuration Options
+
+Set Proton options via `--profiler-config` JSON. All fields use the `proton_` prefix:
+
+| Field | Values | Default | Description |
+|-------|--------|---------|-------------|
+| `proton_profiler_dir` | directory path | (required) | Output directory for profiling files |
+| `proton_context` | `"shadow"`, `"python"` | `"shadow"` | `shadow` uses user-annotated scopes (faster); `python` captures full Python call stacks (richer but larger output) |
+| `proton_data` | `"tree"`, `"trace"` | `"tree"` | `tree` produces `.hatchet` files (aggregated); `trace` produces `.chrome_trace` files (timeline) |
+| `proton_backend` | `"cupti"`, `"roctracer"`, `"instrumentation"`, `null` | `null` | GPU profiling backend. `null` auto-detects (`cupti` for NVIDIA, `roctracer` for AMD) |
+| `proton_mode` | string | `null` | Backend-specific mode. Options: `"pcsampling"` (CUPTI), `"periodic_flushing"`, `"periodic_flushing:format=hatchet"` |
+| `proton_hook` | `"triton"`, `null` | `null` | Set to `"triton"` to capture Triton kernel launch metadata |
+
+General scheduling fields shared with the torch profiler also apply:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `delay_iterations` | `0` | Skip this many worker steps before starting profiling |
+| `max_iterations` | `0` | Stop profiling after this many steps (`0` = unlimited) |
+
+### Example Commands and Usage
+
+#### Basic Profiling (Non-Periodic)
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_output", "proton_hook": "triton"}'
+```
+
+Then trigger profiling:
+
+```bash
+# Start profiling
+curl -X POST http://localhost:8000/start_profile
+
+# Send requests
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "meta-llama/Llama-3.1-8B-Instruct",
+        "messages": [{"role": "user", "content": "Hello!"}]
+    }'
+
+# Stop profiling — writes output files
+curl -X POST http://localhost:8000/stop_profile
+```
+
+Output files appear in `./proton_output/`:
+
+```
+proton_rank0.hatchet    # Rank 0 profiling data
+proton_rank1.hatchet    # Rank 1 (if using tensor parallelism)
+```
+
+#### Long-Running Profiling (Periodic Flushing)
+
+For production servers where you want to profile multiple intervals without restarting:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_output", "proton_mode": "periodic_flushing", "proton_hook": "triton"}'
+```
+
+Each start/stop cycle writes a separate `.part_N` file:
+
+```bash
+# Cycle 1
+curl -X POST http://localhost:8000/start_profile
+# ... send requests ...
+curl -X POST http://localhost:8000/stop_profile
+
+# Cycle 2
+curl -X POST http://localhost:8000/start_profile
+# ... send requests ...
+curl -X POST http://localhost:8000/stop_profile
+```
+
+Output files accumulate across cycles:
+
+```
+proton_rank0.part_0.hatchet    # Data from cycle 1
+proton_rank0.part_1.hatchet    # Data from cycle 2
+```
+
+!!! note
+    Due to Proton's phase design, output for phase N appears after phase N+1's deactivate. This means the first output file appears after the **second** start/stop cycle.
+
+#### Checking Profiling Status
+
+```bash
+curl http://localhost:8000/profile_status
+```
+
+Returns:
+
+```json
+{
+    "active": false,
+    "profiler": "proton",
+    "current_phase": 2,
+    "output_dir": "./proton_output",
+    "output_files": ["proton_rank0.part_0.hatchet", "proton_rank1.part_0.hatchet"]
+}
+```
+
+#### Using Python Context for Rich Call Stacks
+
+Set `proton_context` to `"python"` for full Python-level profiling:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_output", "proton_context": "python", "proton_hook": "triton"}'
+```
+
+This produces much richer output with Python call stacks but generates larger files.
+
+#### Timeline Trace Output
+
+Set `proton_data` to `"trace"` for Chrome trace format, viewable in <https://ui.perfetto.dev/>:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_output", "proton_data": "trace"}'
+```
+
+Output: `proton_rank0.chrome_trace` — open in Perfetto or `chrome://tracing`.
+
+### Viewing Results
+
+- **`.hatchet` files** (tree format): View with `proton-viewer` CLI tool:
+    ```bash
+    pip install llnl-hatchet
+    proton-viewer -m time/ns proton_rank0.hatchet
+    ```
+- **`.chrome_trace` files** (trace format): Open in <https://ui.perfetto.dev/> or `chrome://tracing`.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.
