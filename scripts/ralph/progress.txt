@@ -408,3 +408,21 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Server cleanup uses terminate() with 30s timeout, then kill() as fallback, wrapped in try/finally
   - --profiler-config JSON string must be passed directly to vllm serve — json.dumps() handles escaping
 ---
+
+## 2026-03-07 - US-006 (profiling study)
+- Created `scripts/profiling/analyze_profiles.sh` — runs proton-viewer on all .hatchet files from offline and online profiling
+- Analyzes offline profiles (shadow+tree, python+tree) for both nano-vllm and vLLM
+- Analyzes online periodic flushing profiles with warmup vs steady-state phase comparison
+- Side-by-side comparison of vLLM vs nano-vllm for shadow+tree and python+tree modes
+- Chrome trace file listing with Perfetto instructions saved to chrome_traces.txt
+- analyze_hatchet() helper function: runs proton-viewer -m time/ns, saves output, prints top-10 kernels and kernel count
+- 55 source-level verification tests in `tests/profiling/test_analyze_profiles.py` (3 test classes: script structure, syntax, helper verification)
+- All 307 profiling tests pass
+- Files changed: scripts/profiling/analyze_profiles.sh, tests/profiling/test_analyze_profiles.py
+- **Learnings for future iterations:**
+  - proton-viewer -m time/ns <file> outputs kernel timing data with header row — use head -n 11 for top-10 (1 header + 10 data)
+  - analyze_hatchet() helper pattern: takes file path + label, saves output to ANALYSIS_DIR/${label}.txt
+  - Only .hatchet (tree format) files can be analyzed by proton-viewer — .chrome_trace files are for visual inspection in Perfetto
+  - Phase comparison uses .part_0.hatchet (warmup) and .part_1.hatchet (steady-state) naming convention
+  - Side-by-side comparison needs specific file name patterns: {framework}_offline_{context}_{data}_proton_rank0.txt
+---

@@ -106,7 +106,7 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-002, US-003, US-004, US-005 (requires profile output files)"
     },
     {
