@@ -386,3 +386,25 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - generate_prompts() with seeded random selection from PROMPT_TEMPLATES ensures reproducible varying-length prompts
   - The online shell script uses a single config (shadow+tree) rather than 4 configs — periodic flushing is the focus, not format comparison
 ---
+
+## 2026-03-07 - US-005 (profiling study)
+- Created `scripts/profiling/vllm_online.sh` — profiles vLLM online serving with Proton periodic flushing
+- Created `scripts/profiling/helpers/vllm_online_run.py` — starts vLLM server, uses REST API to control profiling phases
+- Uses REST API endpoints: /start_profile, /stop_profile, /profile_status, /v1/chat/completions, /health
+- Two profiling phases: warmup (small batch) then steady-state (full batch), matching nano-vllm workload
+- Same PROMPT_TEMPLATES and seeded random selection as nano-vllm for fair comparison
+- Same default workload parameters: num_prompts=4, warmup_prompts=2, input_len=2048, output_len=128, seed=42
+- Server management: subprocess.Popen with terminate/kill cleanup in finally block
+- Profiler config passed as --profiler-config JSON with periodic_flushing mode
+- Shell script validates .hatchet output with proton-viewer, counts .part_N files, prints summary
+- 74 source-level verification tests in `tests/profiling/test_vllm_online.py` (3 test classes: script structure, syntax, helper verification)
+- All 252 profiling tests pass
+- Files changed: scripts/profiling/vllm_online.sh, scripts/profiling/helpers/vllm_online_run.py, tests/profiling/test_vllm_online.py
+- **Learnings for future iterations:**
+  - vLLM online profiling uses REST API (/start_profile, /stop_profile) unlike nano-vllm which uses direct profiler.start()/stop()
+  - vLLM server started via subprocess.Popen with vllm.entrypoints.openai.api_server module
+  - wait_for_server() polls /health endpoint with 2s interval and 300s timeout — server can take 35-45s to start
+  - Chat completions use /v1/chat/completions with messages format (not raw prompts)
+  - Server cleanup uses terminate() with 30s timeout, then kill() as fallback, wrapped in try/finally
+  - --profiler-config JSON string must be passed directly to vllm serve — json.dumps() handles escaping
+---
