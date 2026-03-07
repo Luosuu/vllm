@@ -353,3 +353,17 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Output subdirectory naming: ${CONTEXT}_${DATA} (e.g., shadow_tree, python_trace)
   - The nano_vllm_offline_run.py helper maps --num-prompts to batch size and --max-model-len to input length
 ---
+
+## 2026-03-07 - US-003 (profiling study)
+- Created `scripts/profiling/vllm_offline.sh` — profiles vLLM offline inference with Qwen3-32B in all 4 Proton configurations
+- 4 configs: shadow+tree, shadow+trace, python+tree, python+trace — each outputs to separate subdirectory under profiling_output/vllm/offline/
+- Matching workload defaults to nano-vllm: batch_size=4, input_len=2048, output_len=128, seed=42
+- Reuses existing vllm_offline_run.py helper which uses vLLM's ProfilerConfig with --profiler-config JSON
+- Validates .hatchet output files with proton-viewer and prints output file summary with sizes
+- 45 source-level verification tests in `tests/profiling/test_vllm_offline.py` (3 test classes: script structure, helper verification, syntax)
+- Files changed: scripts/profiling/vllm_offline.sh, tests/profiling/test_vllm_offline.py
+- **Learnings for future iterations:**
+  - vLLM offline script mirrors nano-vllm offline script structure exactly — same CONFIGS array, same argument parsing, same validation/summary sections
+  - The vllm_offline_run.py helper uses ProfilerConfig(profiler="proton", proton_profiler_dir=..., proton_context=..., proton_data=..., proton_hook=...) — no --profiler-config JSON needed for offline mode
+  - Workload defaults must match between nano-vllm and vLLM scripts for fair comparison
+---
