@@ -322,3 +322,19 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Integration tests that simulate the full CLI pipeline work well without GPU by mocking Proton's file I/O behavior
   - The mock's `scope()` method records scope names in a list, which are then embedded in the output JSON for verification
 ---
+
+## 2026-03-07 - US-001 (profiling study)
+- Created `scripts/profiling/sanity_check.sh` — profiles both nano-vllm and vLLM with Qwen3-0.6B using shadow+tree config
+- Created `scripts/profiling/helpers/nano_vllm_offline_run.py` — nano-vllm offline inference with Proton profiling
+- Created `scripts/profiling/helpers/vllm_offline_run.py` — vLLM offline inference with Proton profiling via ProfilerConfig
+- Shell script: activates venv, runs both frameworks, validates .hatchet output with proton-viewer, prints pass/fail summary
+- Model configurable via CLI argument (default: Qwen/Qwen3-0.6B)
+- 44 source-level verification tests in `tests/profiling/test_sanity_check.py`
+- Files changed: scripts/profiling/sanity_check.sh, scripts/profiling/helpers/nano_vllm_offline_run.py, scripts/profiling/helpers/vllm_offline_run.py, tests/profiling/__init__.py, tests/profiling/test_sanity_check.py
+- **Learnings for future iterations:**
+  - nano-vllm uses ProtonProfiler directly with start()/stop()/shutdown() lifecycle
+  - vLLM uses ProfilerConfig passed to LLM constructor, then llm.start_profile()/stop_profile()
+  - For sanity checks, use enforce_eager=True and small max_model_len (512) to keep runtime short
+  - proton-viewer -m <file> validates .hatchet files; exit code 0 means valid
+  - Shell script variable scoping: variables set inside while-read pipes are lost — use for-loops instead
+---
