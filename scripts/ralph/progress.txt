@@ -426,3 +426,24 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - Phase comparison uses .part_0.hatchet (warmup) and .part_1.hatchet (steady-state) naming convention
   - Side-by-side comparison needs specific file name patterns: {framework}_offline_{context}_{data}_proton_rank0.txt
 ---
+
+## 2026-03-07 - US-007 (profiling study)
+- Created `scripts/profiling/run_all.sh` — master script that runs all profiling steps in sequence
+- Steps: sanity check → nano-vllm offline → vLLM offline → nano-vllm online → vLLM online → analysis
+- Sanity check must pass before proceeding to 32B runs (aborts on failure)
+- All workload parameters forwarded to sub-scripts via CLI args
+- Skip flags: --skip-sanity, --skip-offline, --skip-online, --skip-analysis
+- Tracks pass/fail per step with final summary
+- Created `scripts/profiling/README.md` — summary report documenting the full study
+- README includes: hardware setup, model, workload parameters, how to run, quantitative comparison table
+- README includes: shadow vs python context observations, tree vs trace format trade-offs
+- README includes: periodic flushing warmup vs steady-state comparison, output directory conventions
+- 80 source-level verification tests in `tests/profiling/test_run_all.py` (3 test classes: script structure, syntax, README)
+- All 387 profiling tests pass
+- Files changed: scripts/profiling/run_all.sh, scripts/profiling/README.md, tests/profiling/test_run_all.py
+- **Learnings for future iterations:**
+  - Master script pattern: run sub-scripts via bash "$SCRIPT_DIR/sub_script.sh" with forwarded args
+  - Use skip flags (--skip-sanity, etc.) to allow partial re-runs without repeating completed steps
+  - Sanity check gate pattern: if sanity fails, print summary and exit 1 immediately — don't waste time on expensive runs
+  - README quantitative comparison table uses TBD placeholders — filled in after actual profiling runs
+---
