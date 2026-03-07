@@ -367,3 +367,22 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - The vllm_offline_run.py helper uses ProfilerConfig(profiler="proton", proton_profiler_dir=..., proton_context=..., proton_data=..., proton_hook=...) — no --profiler-config JSON needed for offline mode
   - Workload defaults must match between nano-vllm and vLLM scripts for fair comparison
 ---
+
+## 2026-03-07 - US-004 (profiling study)
+- Created `scripts/profiling/nano_vllm_online.sh` — profiles nano-vllm with simulated online requests using periodic flushing
+- Created `scripts/profiling/helpers/nano_vllm_online_run.py` — simulates online serving via add_request/step API with 2 profiling phases (warmup + steady-state)
+- Uses Proton periodic_flushing mode to capture warmup and steady-state phases as separate .part_N.hatchet files
+- Workload: sequential requests with varying prompt lengths from PROMPT_TEMPLATES, seeded random selection
+- run_phase() helper adds requests one at a time via add_request(), then steps until is_finished()
+- Two profiling phases: warmup (small batch) then steady-state (full batch), each bracketed by profiler.start()/stop()
+- Shell script validates .hatchet output with proton-viewer, counts .part_N files, prints summary
+- 57 source-level verification tests in `tests/profiling/test_nano_vllm_online.py` (3 test classes: script structure, syntax, helper verification)
+- All 178 profiling tests pass
+- Files changed: scripts/profiling/nano_vllm_online.sh, scripts/profiling/helpers/nano_vllm_online_run.py, tests/profiling/test_nano_vllm_online.py
+- **Learnings for future iterations:**
+  - nano-vllm has no server mode — "online" profiling simulates sequential requests via add_request/step API
+  - Periodic flushing in nano-vllm uses ProtonProfiler(mode="periodic_flushing") — each start()/stop() cycle captures one phase
+  - run_phase() pattern: add_request() for each prompt, then loop step() until is_finished() — simulates online traffic without batch generate()
+  - generate_prompts() with seeded random selection from PROMPT_TEMPLATES ensures reproducible varying-length prompts
+  - The online shell script uses a single config (shadow+tree) rather than 4 configs — periodic flushing is the focus, not format comparison
+---
