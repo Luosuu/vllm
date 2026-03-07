@@ -338,3 +338,18 @@ Started: Wed Mar  5 00:00:00 UTC 2026
   - proton-viewer -m <file> validates .hatchet files; exit code 0 means valid
   - Shell script variable scoping: variables set inside while-read pipes are lost — use for-loops instead
 ---
+
+## 2026-03-07 - US-002 (profiling study)
+- Created `scripts/profiling/nano_vllm_offline.sh` — profiles nano-vllm offline inference with Qwen3-32B in all 4 Proton configurations
+- 4 configs: shadow+tree, shadow+trace, python+tree, python+trace — each outputs to separate subdirectory under profiling_output/nano_vllm/offline/
+- Uses --proton-hook triton for all configs to capture Triton kernel metadata
+- Workload parameters configurable via CLI args: --model, --batch-size, --input-len, --output-len, --seed
+- Validates .hatchet output files with proton-viewer and prints output file summary with sizes
+- Reuses existing nano_vllm_offline_run.py helper from US-001
+- 32 source-level verification tests in `tests/profiling/test_nano_vllm_offline.py`
+- Files changed: scripts/profiling/nano_vllm_offline.sh, tests/profiling/test_nano_vllm_offline.py
+- **Learnings for future iterations:**
+  - Shell script config iteration pattern: store configs as "context:data" strings in CONFIGS array, parse with ${config%%:*} and ${config##*:}
+  - Output subdirectory naming: ${CONTEXT}_${DATA} (e.g., shadow_tree, python_trace)
+  - The nano_vllm_offline_run.py helper maps --num-prompts to batch size and --max-model-len to input length
+---
