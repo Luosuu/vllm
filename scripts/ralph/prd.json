@@ -52,7 +52,7 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001 and US-002. This story verifies the integration between early init and the existing profile() API. The existing 'if self.profiler is None' guard should handle this naturally."
     },
     {
@@ -66,7 +66,7 @@
         "Profile output includes CUDA graph capture activity (visible in proton-viewer output)"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-002 and US-003. This is a manual verification story — run the actual profiling script and check output."
     }
   ]

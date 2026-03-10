@@ -49,3 +49,28 @@ Started: 2026-03-10
   - The `profile()` method's `if self.profiler is None` guard at line 796 naturally skips re-creation when the profiler was early-initialized
   - All 75 tests pass (68 existing + 7 new); no typecheck regressions
 ---
+
+## 2026-03-10 - US-003
+- Added TestProfileReusesEarlyInitSession test class with 8 integration tests
+- Tests verify the full lifecycle through the public WorkerProfiler API (start/stop, not _start/_stop)
+- Covers: non-periodic full lifecycle, periodic full lifecycle, no-early-init regression, multiple cycles, shutdown
+- No code changes needed — the existing implementation from US-001 and US-002 already handles all cases correctly
+- Files changed: `tests/v1/worker/test_proton_profiler.py`
+- **Learnings for future iterations:**
+  - The public API (start/stop) adds _active and _running state management on top of _start/_stop — tests must use the public API to verify the full lifecycle
+  - All 82 tests pass (75 existing + 8 new - 1 overlap = 82)
+  - Pre-existing mypy errors in gpu_worker.py are unrelated to profiler code (arg-type, type-var issues)
+---
+
+## 2026-03-10 - US-004
+- Ran end-to-end verification of vLLM offline profiling with Proton (Qwen3-0.6B, shadow+tree config)
+- Confirmed: no `[PROTON] Cannot find graph for graphExecId` warning in output
+- Confirmed: valid `proton_rank0.hatchet` file produced and loadable by proton-viewer
+- Confirmed: profile output includes CUDA graph capture activity (`<captured_at>` entries with attention, GEMM, and triton fused kernels)
+- All 82 unit tests pass
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt` (verification only, no code changes)
+- **Learnings for future iterations:**
+  - The sanity_check.sh script tests both nano-vllm and vLLM; for quick single-framework verification, call the helper script directly: `python scripts/profiling/helpers/vllm_offline_run.py`
+  - Proton profile output shows `execute_context_*` entries with `<captured_at>` sub-entries when CUDA graph capture is profiled — this confirms the early-start fix is working
+  - The H100 GPU captures 51 CUDA graph sizes for both PIECEWISE and FULL modes
+---
