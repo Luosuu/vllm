@@ -1,194 +1,73 @@
 {
-  "project": "vLLM",
-  "branchName": "ralph/proton-profiler",
-  "description": "Integrate Proton profiler into vLLM: backend, config, and contiguous profiling with periodic flushing",
+  "project": "vLLM Proton Early Start Fix",
+  "branchName": "ralph/proton-profiling-study",
+  "description": "Fix Proton 'Cannot find graph for graphExecId' warning by starting Proton session before CUDA graph capture and deactivating after capture completes",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Add Proton config fields to ProfilerConfig",
-      "description": "As a developer, I need Proton-specific fields in ProfilerConfig so users can configure Proton through --profiler-config JSON.",
+      "title": "Add start_and_deactivate method to ProtonProfilerWrapper",
+      "description": "As a developer, I want ProtonProfilerWrapper to support creating a session and later deactivating it so that the GPU worker can start Proton before CUDA graph capture and deactivate after capture completes.",
       "acceptanceCriteria": [
-        "ProfilerConfig in vllm/config/profiler.py has field proton_profiler_dir: str (default '')",
-        "ProfilerConfig has field proton_context: str — 'shadow' or 'python' (default 'shadow')",
-        "ProfilerConfig has field proton_data: str — 'tree' or 'trace' (default 'tree')",
-        "ProfilerConfig has field proton_backend: str | None — 'cupti', 'roctracer', 'instrumentation', or None (default None)",
-        "ProfilerConfig has field proton_mode: str | None — free-form backend-specific string (default None)",
-        "ProfilerConfig has field proton_hook: str | None — 'triton' or None (default None)",
-        "All fields have docstrings explaining valid values",
-        "Existing torch/cuda config fields are unchanged",
+        "Add a public method start_and_deactivate() to ProtonProfilerWrapper in vllm/profiler/wrapper.py",
+        "start_and_deactivate() calls _create_session() to create the Proton session via proton.start()",
+        "start_and_deactivate() does NOT immediately deactivate — the caller controls when to deactivate",
+        "Add a public method deactivate_early() that calls proton.deactivate() WITHOUT flushing to pause the session",
+        "After start_and_deactivate() + deactivate_early(), internal state has _session_id set and _running is False",
+        "Subsequent calls to _start() detect existing _session_id and call proton.activate() instead of proton.start() (for both periodic and non-periodic modes)",
+        "In non-periodic mode, _stop() after an activate()-based start calls proton.deactivate(flushing=True) then proton.finalize(), not just proton.finalize()",
+        "Unit tests cover: start_and_deactivate then deactivate_early then _start activates existing session then _stop finalizes",
+        "Unit tests cover: both periodic and non-periodic modes work correctly with the early-start pattern",
         "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Follow the torch_profiler_* naming pattern but with proton_ prefix. Refer to Proton CLI flags: -n/--name, -b/--backend, -c/--context, -m/--mode, -d/--data, -k/--hook. Proton source at submodules/triton/third_party/proton."
+      "notes": "This is the core wrapper change. The two-method split (start_and_deactivate + deactivate_early) lets the GPU worker keep Proton active during CUDA graph capture and deactivate only after capture completes."
     },
     {
       "id": "US-002",
-      "title": "Add validation for Proton config fields",
-      "description": "As a developer, I need the config to validate Proton fields so users get clear errors for invalid values.",
+      "title": "Wire early Proton start in GPU worker compile_or_warm_up_model",
+      "description": "As a developer profiling vLLM with Proton, I want the Proton session started before CUDA graph capture and deactivated after capture so that Proton tracks graph creation without the 'Cannot find graph' warning.",
       "acceptanceCriteria": [
-        "When profiler='proton', proton_profiler_dir must be set (non-empty) — raises validation error otherwise",
-        "proton_context is validated to be 'shadow' or 'python'",
-        "proton_data is validated to be 'tree' or 'trace'",
-        "proton_backend is validated to be 'cupti', 'roctracer', 'instrumentation', or None",
-        "proton_hook is validated to be 'triton' or None",
-        "proton_mode accepts any string without validation (backend-dependent)",
-        "proton_profiler_dir is converted to absolute path (same URI scheme handling as torch_profiler_dir)",
-        "Validation errors produce clear messages indicating valid options",
+        "In gpu_worker.py compile_or_warm_up_model(), when profiler_config.profiler == 'proton', create ProtonProfilerWrapper and call start_and_deactivate() BEFORE capture_model() is called",
+        "Call deactivate_early() AFTER capture_model() returns — Proton is active during the entire CUDA graph capture phase",
+        "Store the wrapper in self.profiler so profile(is_start=True) reuses it via the existing 'if self.profiler is None' guard",
+        "Only Proton profiler gets early initialization — torch and cuda profiler types are unaffected",
+        "When enforce_eager is True (no CUDA graph capture), still start and deactivate Proton early for consistency",
         "Typecheck passes"
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Add validation in the existing @model_validator(mode='after') method. Follow the same pattern as torch_profiler_dir validation."
+      "notes": "Depends on US-001. Key sequence: proton.start() → warmup + capture_model() → proton.deactivate(). The existing profile() method already guards with 'if self.profiler is None' so it will reuse the early-created wrapper."
     },
     {
       "id": "US-003",
-      "title": "Wire Proton config into ProtonProfilerWrapper",
-      "description": "As a developer, I need ProtonProfilerWrapper to read the new config fields and pass them to proton.start().",
+      "title": "Ensure profile() reuses early-initialized Proton profiler correctly",
+      "description": "As a developer, I want profile(is_start=True) to correctly activate the deactivated Proton session created during init rather than creating a duplicate.",
       "acceptanceCriteria": [
-        "ProtonProfilerWrapper.__init__() reads all 6 Proton config fields from ProfilerConfig",
-        "_start() calls proton.start(name=..., context=..., data=..., backend=..., mode=..., hook=...)",
-        "Output file is written to proton_profiler_dir",
-        "Existing scheduling via delay_iterations, max_iterations, warmup_iterations, active_iterations, wait_iterations continues to work",
-        "Docstrings and inline comments explain each parameter mapping",
+        "profile(is_start=True) skips wrapper creation when self.profiler is not None (existing guard at line 776)",
+        "profile(is_start=True) calls self.profiler.start() which internally calls proton.activate() on the existing deactivated session",
+        "profile(is_start=False) calls self.profiler.stop() which works correctly whether session was early-started or not",
+        "Both periodic and non-periodic Proton modes work correctly: start_profile → generate → stop_profile cycle produces valid output",
+        "Unit tests verify the full lifecycle: early init in compile_or_warm_up_model → start_profile → stop_profile",
         "Typecheck passes"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "ProtonProfilerWrapper already exists in vllm/profiler/wrapper.py. Update it to use the new config fields instead of hardcoded defaults. GPU worker profile() method in vllm/v1/worker/gpu_worker.py may need updating to pass new config fields."
+      "notes": "Depends on US-001 and US-002. This story verifies the integration between early init and the existing profile() API. The existing 'if self.profiler is None' guard should handle this naturally."
     },
     {
       "id": "US-004",
-      "title": "Write tests for Proton config validation and wiring",
-      "description": "As a developer, I need tests that verify Proton config fields are validated and wired correctly.",
+      "title": "Verify fix with vllm_offline.sh end-to-end",
+      "description": "As a developer, I want to run the offline profiling script and confirm the Proton warning is eliminated and valid profiles are produced.",
       "acceptanceCriteria": [
-        "Unit test: ProfilerConfig(profiler='proton', proton_profiler_dir='/tmp/proton') creates valid config",
-        "Unit test: ProfilerConfig(profiler='proton') without proton_profiler_dir raises validation error",
-        "Unit test: invalid proton_context value raises validation error",
-        "Unit test: invalid proton_data value raises validation error",
-        "Unit test: invalid proton_backend value raises validation error",
-        "Unit test: invalid proton_hook value raises validation error",
-        "Unit test: proton_mode accepts arbitrary strings without error",
-        "Integration test: Proton config fields are correctly passed to proton.start() arguments",
-        "All existing profiler config tests continue to pass",
-        "Tests pass"
+        "Run scripts/profiling/vllm_offline.sh end-to-end (or sanity_check.sh with a small model)",
+        "No '[PROTON] Cannot find graph for graphExecId' warning in output",
+        "Valid .hatchet output files are produced and loadable by proton-viewer",
+        "Profile output includes CUDA graph capture activity (visible in proton-viewer output)"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "Existing test file at tests/v1/worker/test_proton_profiler.py. Add config validation tests there or in a new test file."
-    },
-    {
-      "id": "US-005",
-      "title": "End-to-end validation with proton config options",
-      "description": "As a developer, I need to validate that Proton config options work end-to-end with vllm serve.",
-      "acceptanceCriteria": [
-        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"proton_profiler_dir\": \"/tmp/proton_output\", \"proton_context\": \"shadow\", \"proton_data\": \"tree\", \"proton_hook\": \"triton\"}' starts without errors",
-        "Triggering /start_profile and /stop_profile produces profiling output in /tmp/proton_output",
-        "Output format matches proton_data setting (tree produces .hatchet file, trace produces .chrome_trace file)",
-        "Changing proton_context to 'python' produces Python-context profiling data"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~80s. Use proton_profiler_dir instead of torch_profiler_dir for the output directory."
-    },
-    {
-      "id": "US-006",
-      "title": "Support periodic_flushing mode in ProtonProfilerWrapper",
-      "description": "As a developer, I need ProtonProfilerWrapper to support Proton's periodic_flushing mode so profiling data is automatically flushed to per-phase files during long-running sessions.",
-      "acceptanceCriteria": [
-        "Detect 'periodic_flushing' prefix in proton_mode to switch to persistent session lifecycle",
-        "Session is created once on first _start() call and reused across subsequent start/stop cycles",
-        "_start() calls proton.activate(session) in periodic mode instead of proton.start()",
-        "_stop() calls proton.deactivate(session, flushing=True) in periodic mode instead of proton.finalize()",
-        "proton.finalize() is only called on shutdown(), not on every stop",
-        "Per-phase .part_N output files are written automatically by Proton during deactivate",
-        "Non-periodic mode continues to work as before (start/finalize per cycle)",
-        "Docstrings explain both periodic and non-periodic modes",
-        "Typecheck passes"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "Check for 'periodic_flushing' prefix in proton_mode (it may be 'periodic_flushing' or 'periodic_flushing:format=hatchet_msgpack'). Store a _periodic_mode bool flag in __init__. Session created lazily on first _start(). Proton API: proton.activate(session), proton.deactivate(session, flushing=True), proton.finalize(session)."
-    },
-    {
-      "id": "US-007",
-      "title": "Add phase tracking to ProtonProfilerWrapper",
-      "description": "As a developer, I need the wrapper to track phase state so the status endpoint can report profiling progress.",
-      "acceptanceCriteria": [
-        "Wrapper tracks current phase number (starts at 0, increments on each stop cycle in periodic mode)",
-        "Wrapper tracks list of output file paths generated so far",
-        "Wrapper exposes a get_status() method returning dict with: active (bool), current_phase (int), output_dir (str), output_files (list of str)",
-        "Phase advances on each _stop() call in periodic mode via proton.data.advance_phase(session)",
-        "get_status() works for both periodic and non-periodic modes",
-        "Typecheck passes"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": "proton.data.advance_phase(session) returns the new phase number. Output files follow pattern: <name>.part_N.<format>. Track files by scanning proton_profiler_dir or building the list from known phase numbers and format."
-    },
-    {
-      "id": "US-008",
-      "title": "Add /profile_status API endpoint",
-      "description": "As a user, I want to query profiling status to see the current phase, which files have been written, and whether profiling is active.",
-      "acceptanceCriteria": [
-        "New GET /profile_status endpoint in vllm/entrypoints/serve/profile/api_router.py",
-        "Returns JSON with: active (bool), profiler (str), current_phase (int), output_dir (str), output_files (list of str)",
-        "Returns 200 with empty/default response when no profiler is configured",
-        "Endpoint is registered alongside existing /start_profile and /stop_profile",
-        "Status plumbed through engine/core to worker similar to start/stop profile API",
-        "Typecheck passes"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": "Look at how /start_profile and /stop_profile are implemented in api_router.py and trace the path through async_llm.py → EngineCore → Worker. The status query needs the same plumbing. Return type should be a simple dict/JSON response."
-    },
-    {
-      "id": "US-009",
-      "title": "Wire periodic mode through GPU worker shutdown",
-      "description": "As a developer, I need the GPU worker to call finalize() on shutdown in periodic mode to flush remaining data.",
-      "acceptanceCriteria": [
-        "GPU worker's shutdown or cleanup path calls profiler.shutdown()",
-        "ProtonProfilerWrapper.shutdown() calls proton.finalize(session) in periodic mode to flush remaining phases",
-        "Multiple start/stop cycles before shutdown produce sequential .part_N files without errors",
-        "Works correctly with multi-rank (TP > 1) — each rank produces its own .part_N files",
-        "Typecheck passes"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "The WorkerProfiler base class already has a shutdown() method that calls stop(). In periodic mode, ProtonProfilerWrapper needs to override shutdown() to also call proton.finalize(). Check gpu_worker.py for existing shutdown/cleanup hooks."
-    },
-    {
-      "id": "US-010",
-      "title": "Write tests for contiguous profiling",
-      "description": "As a developer, I need tests verifying periodic flushing mode works correctly.",
-      "acceptanceCriteria": [
-        "Unit test: periodic mode uses activate/deactivate instead of start/finalize",
-        "Unit test: non-periodic mode continues using start/finalize (no regression)",
-        "Unit test: phase number increments on each stop in periodic mode",
-        "Unit test: get_status() returns correct phase and file information",
-        "Unit test: shutdown calls finalize in periodic mode",
-        "Unit test: session is created once and reused across multiple start/stop cycles",
-        "All existing profiler tests continue to pass",
-        "Tests pass"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": "Use the _make_wrapper_with_mock() pattern from existing tests. Mock proton.activate, proton.deactivate, proton.data.advance_phase, proton.finalize. Verify call sequences across multiple start/stop cycles."
-    },
-    {
-      "id": "US-011",
-      "title": "End-to-end validation of contiguous profiling with vllm serve",
-      "description": "As a developer, I need to validate contiguous profiling works end-to-end with the vllm serve command.",
-      "acceptanceCriteria": [
-        "vllm serve openai/gpt-oss-20b --profiler-config '{\"profiler\": \"proton\", \"proton_profiler_dir\": \"/tmp/proton_output\", \"proton_mode\": \"periodic_flushing\", \"proton_hook\": \"triton\"}' starts without errors",
-        "First /start_profile + requests + /stop_profile cycle produces .part_0 output file",
-        "Second /start_profile + requests + /stop_profile cycle produces .part_1 output file",
-        "/profile_status returns correct phase number and file list after each cycle",
-        "Output files contain meaningful profiling data (not empty)"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "The openai/gpt-oss-20b model requires --tensor-parallel-size 2 on 2x L40S GPUs. Server startup takes ~35-45s. Send chat completion requests between start/stop to generate profiling data. NOTE: Due to Proton's periodic flushing design, the current phase is never flushed — output files for phase N appear after phase N+1's deactivate. A C++ bug fix in GPUProfiler.cpp was needed for mode='periodic_flushing' without format suffix."
+      "notes": "Depends on US-002 and US-003. This is a manual verification story — run the actual profiling script and check output."
     }
   ]
 }

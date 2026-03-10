@@ -1,196 +1,76 @@
 # Ralph Progress Log
-Started: Wed Mar  5 00:00:00 UTC 2026
+Started: 2026-03-10
+---
 
 ## Codebase Patterns
 - Profiler code lives in `vllm/profiler/wrapper.py` (implementations) and `vllm/config/profiler.py` (config)
-- `ProfilerKind` is a `Literal` type in `vllm/config/profiler.py`
 - `WorkerProfiler` is the abstract base class; subclasses implement `_start()`, `_stop()`, and `annotate_context_manager()`
 - Profiler creation is inline in GPU worker's `profile()` method (no separate factory function)
 - GPU worker uses lazy profiler init; CPU/XPU workers use eager init
 - `triton.profiler` is the import path for Proton (`import triton.profiler as proton`)
 - Proton API: `proton.start(name, hook)` returns session_id, `proton.finalize(session=id)`, `proton.scope(name)` is a context manager
-- `proton.start()` accepts: name, context ("shadow"/"python"), data ("tree"/"trace"), backend ("cupti"/"roctracer"/"instrumentation"/None), mode (string), hook ("triton"/None)
+- `proton.start()` accepts: name, context, data, backend, mode, hook — all keyword-only except name
 - ProtonProfilerWrapper takes `output_dir` and `local_rank` params (not `worker_name` like Torch)
-- `torch_profiler_dir` is for torch profiler only; `proton_profiler_dir` is for proton profiler (fully separated)
-- Proton validation lives in `_validate_proton_fields()` helper called from main validator
-- Periodic flushing mode detected by checking `proton_mode.startswith("periodic_flushing")` — mode string may be "periodic_flushing" or "periodic_flushing:format=hatchet_msgpack"
 - In periodic mode: `_create_session()` on first `_start()`, then `activate()`/`deactivate(flushing=True)` on subsequent cycles; `finalize()` only on `shutdown()`
-- In non-periodic mode: `_create_session()` + `finalize()` on every start/stop cycle (unchanged from before)
+- In non-periodic mode: `_create_session()` + `finalize()` on every start/stop cycle
 - Start/stop profile API is pass-through: LLM → LLMEngine → EngineCore → Worker.profile() — only worker has profiler type branching
 - GPU worker has TWO places where profiler type matters: (1) early validation in `__init__` and (2) lazy instantiation in `profile()` — both must be kept in sync
-- ProtonProfilerWrapper.get_status() returns a plain dict — use this for API endpoint responses
-- New RPC methods need 5 layers: Worker → Executor → EngineCore → CoreClient (base + InprocClient + SyncMPClient + AsyncMPClient) → AsyncLLM → EngineClient protocol
 - Environment managed by `uv`; activate with `. .venv/bin/activate`
-- For TP>1, use `--tensor-parallel-size 2` with `vllm serve`; each rank produces its own output file
-- Proton source and docs at `submodules/triton/third_party/proton`
-- **CRITICAL BUG**: Proton C++ `setPeriodicFlushingMode()` in `GPUProfiler.cpp:178` has a missing `return` — when mode is just "periodic_flushing" (no `:format=...` suffix), it falls through to access `modeAndOptions[1]` causing a segfault. Fixed by adding `return` after the default format assignment.
-- Periodic flushing design: the current phase is NEVER flushed during `deactivate()` — only _previous_ phases are flushed. So phase N's output file only appears after phase N+1's deactivate. First output file appears after second start/stop cycle.
+- Cannot mock triton.profiler via sys.modules when it's already loaded — instead patch wrapper._proton after construction
+- Use _make_wrapper_with_mock() helper pattern: construct with real proton, then replace _proton attribute with MagicMock
+- CUDA graph capture happens in `compile_or_warm_up_model()` at `self.model_runner.capture_model()` (gpu_worker.py line 522)
+- `compile_or_warm_up_model()` sequence: warmup runs → kernel_warmup → capture_model()
+- Early-start pattern: `start_and_deactivate()` → GPU activity → `deactivate_early()` → normal `start()`/`stop()` reuses session via `activate()`
+- `_was_activated` flag tracks whether current cycle was started via `activate()` (affects `_stop()` behavior in non-periodic mode)
+- Early Proton start is wired in `compile_or_warm_up_model()` between `kernel_warmup()` and `capture_model()` — profiler stored in `self.profiler` for reuse by `profile()`
 ---
 
-## 2026-03-05 - US-001
-- Added 6 Proton-specific config fields to ProfilerConfig in vllm/config/profiler.py
-- Fields: proton_profiler_dir, proton_context, proton_data, proton_backend, proton_mode, proton_hook
-- All fields have docstrings explaining valid values and defaults
-- Files changed: vllm/config/profiler.py
+## 2026-03-10 - US-001
+- Implemented `start_and_deactivate()` and `deactivate_early()` public methods on ProtonProfilerWrapper
+- Modified `_start()` to detect existing `_session_id` and call `proton.activate()` instead of `proton.start()` (both modes)
+- Modified `_stop()` in non-periodic mode to call `deactivate(flushing=True)` before `finalize()` when session was activated
+- Added `_was_activated` flag to track activate vs start lifecycle
+- Added 8 unit tests in TestProtonEarlyStart class covering both modes, regression, and full lifecycle
+- Files changed: `vllm/profiler/wrapper.py`, `tests/v1/worker/test_proton_profiler.py`
 - **Learnings for future iterations:**
-  - The proton fields follow the same naming pattern as torch_profiler_* but with proton_ prefix
-  - All existing torch/cuda fields are unchanged — new fields were inserted between torch_profiler_dir and torch_profiler_with_stack
-  - Typecheck and all 22 existing profiler tests pass without changes
+  - The `_start()` refactor unified periodic and non-periodic session reuse logic — both now check `_session_id is not None` to decide activate vs start
+  - `_was_activated` flag is essential for non-periodic `_stop()` — without it, finalize alone would miss flushing profiling data
+  - All 68 existing + new tests pass; no regressions in periodic or non-periodic modes
 ---
 
-## 2026-03-05 - US-002
-- Added validation for all Proton config fields in `_validate_proton_fields()` method
-- proton_profiler_dir required when profiler='proton', converted to absolute path
-- proton_context validated to 'shadow'/'python'
-- proton_data validated to 'tree'/'trace'
-- proton_backend validated to 'cupti'/'roctracer'/'instrumentation'/None
-- proton_hook validated to 'triton'/None (proton_mode accepts any string)
-- Updated GPU worker to use `proton_profiler_dir` instead of `torch_profiler_dir` for proton output
-- Updated all existing tests to pass `proton_profiler_dir` to config
-- Files changed: vllm/config/profiler.py, vllm/v1/worker/gpu_worker.py, tests/v1/worker/test_proton_profiler.py
+## 2026-03-10 - US-002
+- Wired early Proton start in `compile_or_warm_up_model()`: creates ProtonProfilerWrapper and calls `start_and_deactivate()` before `capture_model()`, then `deactivate_early()` after capture
+- Moved `ProtonProfilerWrapper` import from lazy (inside `profile()`) to top-level import in gpu_worker.py
+- Added 7 unit tests in TestProtonEarlyStartInWorker class covering: wrapper creation, deactivation after capture, session reuse via profile(), torch/cuda unaffected, enforce_eager mode, no-profiler-config case
+- Files changed: `vllm/v1/worker/gpu_worker.py`, `tests/v1/worker/test_proton_profiler.py`
 - **Learnings for future iterations:**
-  - Validation is split into main validator + `_validate_proton_fields()` helper for clarity
-  - GPU worker's `profile()` method at line ~788 references config fields — must be updated when config fields change
-  - Existing tests that create `ProfilerConfig(profiler="proton")` all need `proton_profiler_dir` now
-  - The `torch_profiler_dir` field was previously shared with proton — now fully separated
+  - The deactivation guard uses `isinstance(self.profiler, ProtonProfilerWrapper)` + `_session_id is not None` + `not _running` to safely detect early-started state
+  - Early start is placed after `kernel_warmup()` but before `capture_model()` — this is the correct position because kernel warmup doesn't involve CUDA graphs
+  - The `profile()` method's `if self.profiler is None` guard at line 796 naturally skips re-creation when the profiler was early-initialized
+  - All 75 tests pass (68 existing + 7 new); no typecheck regressions
 ---
 
-## 2026-03-05 - US-003
-- Wired all 6 Proton config fields into ProtonProfilerWrapper
-- `__init__()` now reads proton_context, proton_data, proton_backend, proton_mode, proton_hook from ProfilerConfig
-- `_start()` now passes all config fields to `proton.start()` instead of hardcoding `hook="triton"`
-- Output file path still uses `proton_profiler_dir` with rank suffix
-- Added comprehensive docstrings and inline comments for parameter mapping
-- Files changed: vllm/profiler/wrapper.py
+## 2026-03-10 - US-003
+- Added TestProfileReusesEarlyInitSession test class with 8 integration tests
+- Tests verify the full lifecycle through the public WorkerProfiler API (start/stop, not _start/_stop)
+- Covers: non-periodic full lifecycle, periodic full lifecycle, no-early-init regression, multiple cycles, shutdown
+- No code changes needed — the existing implementation from US-001 and US-002 already handles all cases correctly
+- Files changed: `tests/v1/worker/test_proton_profiler.py`
 - **Learnings for future iterations:**
-  - ProtonProfilerWrapper stores config fields as `self._context`, `self._data`, etc. (private attributes)
-  - `proton.start()` signature: `name, *, context, data, backend, mode, hook` — all keyword-only except name
-  - The wrapper constructor signature (output_dir, local_rank) is unchanged — GPU worker code didn't need changes
-  - All 22 existing tests pass without modification since they use defaults matching the old hardcoded values
+  - The public API (start/stop) adds _active and _running state management on top of _start/_stop — tests must use the public API to verify the full lifecycle
+  - All 82 tests pass (75 existing + 8 new - 1 overlap = 82)
+  - Pre-existing mypy errors in gpu_worker.py are unrelated to profiler code (arg-type, type-var issues)
 ---
 
-## 2026-03-05 - US-004
-- Added 15 new tests for Proton config validation and wiring (37 total)
-- Unit tests: invalid proton_context, proton_data, proton_backend, proton_hook all raise ValueError
-- Unit tests: proton_mode accepts arbitrary strings, all valid enum values accepted
-- Unit tests: relative proton_profiler_dir converted to absolute, URI paths preserved
-- Unit test: valid config with all fields explicitly set
-- Integration tests: config fields correctly forwarded to proton.start() arguments
-- Integration test: default config values forwarded correctly
-- Integration test: _stop() calls proton.finalize() with correct session ID
-- Files changed: tests/v1/worker/test_proton_profiler.py
+## 2026-03-10 - US-004
+- Ran end-to-end verification of vLLM offline profiling with Proton (Qwen3-0.6B, shadow+tree config)
+- Confirmed: no `[PROTON] Cannot find graph for graphExecId` warning in output
+- Confirmed: valid `proton_rank0.hatchet` file produced and loadable by proton-viewer
+- Confirmed: profile output includes CUDA graph capture activity (`<captured_at>` entries with attention, GEMM, and triton fused kernels)
+- All 82 unit tests pass
+- Files changed: `scripts/ralph/prd.json`, `scripts/ralph/progress.txt` (verification only, no code changes)
 - **Learnings for future iterations:**
-  - Cannot mock triton.profiler via sys.modules when it's already loaded — instead patch wrapper._proton after construction
-  - Use _make_wrapper_with_mock() helper pattern: construct with real proton, then replace _proton attribute with MagicMock
-  - proton.start() is called with keyword arguments — verify via call_args.kwargs
----
-
-## 2026-03-05 - US-005
-- Validated Proton config end-to-end with vllm serve on 2x L40S GPUs
-- Test 1 (tree/shadow): `vllm serve openai/gpt-oss-20b --tensor-parallel-size 2 --profiler-config '{"profiler":"proton","proton_profiler_dir":"/tmp/proton_output","proton_context":"shadow","proton_data":"tree","proton_hook":"triton"}'` started without errors
-- Triggered /start_profile, sent 3 chat completion requests, triggered /stop_profile
-- Output: proton_rank0.hatchet (160B) and proton_rank1.hatchet (160B) — valid JSON tree format
-- Test 2 (trace/shadow): Changed proton_data to "trace" — output: proton_rank0.chrome_trace (11MB) and proton_rank1.chrome_trace (11MB)
-- Test 3 (tree/python): Changed proton_context to "python" — output: proton_rank0.hatchet (3.8MB) with rich Python call stacks, confirming python context captures Python-level profiling data
-- No code changes needed — all functionality worked correctly with existing implementation
-- Files changed: scripts/ralph/prd.json, scripts/ralph/progress.txt
-- **Learnings for future iterations:**
-  - Shadow context produces minimal output (160B) with just ROOT node when using hook="triton" — this is expected since shadow mode only captures GPU kernel data
-  - Python context produces much richer output (3.8MB) with full Python call stacks
-  - Trace format (.chrome_trace) files are much larger than tree format (.hatchet) files
-  - Server startup takes ~35-45s on 2x L40S GPUs with openai/gpt-oss-20b model
-  - Chat completions endpoint works; completions endpoint may have JSON escape issues with certain shells
----
-
-## 2026-03-05 - US-006
-- Added periodic_flushing mode to ProtonProfilerWrapper
-- Detects "periodic_flushing" prefix in proton_mode to switch lifecycle
-- Extracted _create_session() helper from _start() for reuse in both modes
-- Periodic mode: session created once on first _start(), reactivated via proton.activate() on subsequent calls
-- Periodic _stop() calls proton.deactivate(flushing=True) instead of proton.finalize()
-- Overrode shutdown() to call proton.finalize() only on shutdown in periodic mode
-- Non-periodic mode continues to work exactly as before (start/finalize per cycle)
-- All 37 existing tests pass without changes
-- Typecheck (mypy) passes
-- Files changed: vllm/profiler/wrapper.py
-- **Learnings for future iterations:**
-  - _create_session() encapsulates proton.start() with all config fields — reuse for both modes
-  - In periodic mode, proton.start() is only called once (first _start()); it both creates and activates the session
-  - shutdown() override must handle the case where profiler is still running (call _call_stop() first)
-  - The _periodic_mode flag is set in __init__ and used to branch in _start(), _stop(), and shutdown()
----
-
-## 2026-03-05 - US-007
-- Added phase tracking to ProtonProfilerWrapper: _current_phase (int) and _output_files (list)
-- Added _scan_output_files() to scan output directory for files matching this rank
-- Added get_status() method returning dict with active, current_phase, output_dir, output_files
-- Phase advances on each _stop() in periodic mode via proton.data.advance_phase(session)
-- Added 13 new tests for phase tracking and get_status() (49 total)
-- Files changed: vllm/profiler/wrapper.py, tests/v1/worker/test_proton_profiler.py
-- **Learnings for future iterations:**
-  - proton.data.advance_phase(session) is called after deactivate() to advance to next phase
-  - _scan_output_files() filters by "proton_rank{N}" prefix to only include files for this rank
-  - get_status() returns a plain dict — suitable for JSON serialization in API endpoints
-  - Phase counter is local to the wrapper instance; each rank tracks its own phase independently
----
-
-## 2026-03-05 - US-008
-- Added GET /profile_status endpoint to vllm/entrypoints/serve/profile/api_router.py
-- Added get_status() base method to WorkerProfiler (returns default dict)
-- Added profile_status() to GPUWorker to return profiler status
-- Plumbed through full chain: Executor → EngineCore → CoreClient → AsyncLLM → EngineClient protocol
-- Executor aggregates output_files from all ranks into single response
-- profiler type added at API router level from ProfilerConfig
-- EngineClient.get_profile_status() is non-abstract with default implementation (for LaunchEngineClient)
-- Files changed: vllm/entrypoints/serve/profile/api_router.py, vllm/profiler/wrapper.py, vllm/engine/protocol.py, vllm/v1/engine/async_llm.py, vllm/v1/engine/core.py, vllm/v1/engine/core_client.py, vllm/v1/executor/abstract.py, vllm/v1/worker/gpu_worker.py
-- **Learnings for future iterations:**
-  - New RPC methods need to be added at 5 layers: Worker → Executor → EngineCore → CoreClient (base + InprocClient + SyncMPClient + AsyncMPClient) → AsyncLLM → EngineClient protocol
-  - InprocClient delegates directly to EngineCore; SyncMPClient uses call_utility(); AsyncMPClient uses call_utility_async()
-  - LaunchEngineClient has no-op stubs — use non-abstract methods in protocol for graceful fallback
-  - Executor.collective_rpc() returns list[dict] (one per worker) — aggregate at executor level
----
-
-## 2026-03-05 - US-009
-- Verified GPU worker shutdown path already calls profiler.shutdown() (gpu_worker.py:943-944)
-- ProtonProfilerWrapper.shutdown() already calls proton.finalize(session) in periodic mode (wrapper.py:510)
-- Executor shutdown delegates to worker.shutdown() which triggers profiler cleanup
-- Implementation was completed as part of US-006 (periodic mode lifecycle) and US-008 (shutdown wiring)
-- All 49 proton profiler tests pass, typecheck passes (0 errors in profiler wrapper)
-- No code changes needed — all acceptance criteria already met
-- Files changed: scripts/ralph/prd.json, scripts/ralph/progress.txt
-- **Learnings for future iterations:**
-  - GPU worker shutdown path: executor.shutdown() → worker.shutdown() → profiler.shutdown()
-  - ProtonProfilerWrapper.shutdown() handles both periodic (finalize session) and non-periodic (delegate to base stop) modes
-  - When acceptance criteria are already met by prior stories, verify via tests and typecheck rather than re-implementing
----
-
-## 2026-03-05 - US-010
-- Added TestContiguousProfiling test class with 11 unit tests for periodic flushing mode
-- Tests verify: activate/deactivate call sequences, non-periodic regression, full 3-cycle sequence, flushing=True enforcement, session persistence, shutdown finalize, get_status accuracy, output file tracking, mode string detection with format suffix
-- Total tests: 60 (11 new), all passing. Typecheck passes.
-- Files changed: tests/v1/worker/test_proton_profiler.py
-- **Learnings for future iterations:**
-  - Existing TestProtonPhaseTracking already covered some contiguous profiling scenarios — new tests focus on explicit call sequence verification
-  - Use mock_proton.deactivate.call_args_list to verify all calls have flushing=True across multiple cycles
-  - Non-periodic shutdown goes through stop() → _stop() → finalize() path; periodic shutdown directly calls finalize()
----
-
-## 2026-03-05 - US-011
-- Validated contiguous profiling end-to-end with vllm serve on 2x L40S GPUs
-- Fixed Proton C++ segfault in `setPeriodicFlushingMode()` (GPUProfiler.cpp:178) — missing `return` when mode has no format suffix
-- Rebuilt libproton.so with the fix
-- Server started successfully with: `vllm serve openai/gpt-oss-20b --tensor-parallel-size 2 --profiler-config '{"profiler":"proton","proton_profiler_dir":"/tmp/proton_output","proton_mode":"periodic_flushing","proton_hook":"triton"}'`
-- Ran 3 profiling cycles (start + 3 chat completions + stop each)
-- After cycle 2: proton_rank0.part_0.hatchet (21KB) and proton_rank1.part_0.hatchet (21KB) appeared
-- After cycle 3: proton_rank0.part_1.hatchet (15KB) and proton_rank1.part_1.hatchet (15KB) appeared
-- /profile_status returned correct phase (3), output_dir, and all 4 output_files
-- Output files contain valid JSON with tree-structured profiling data (children, frame, metrics, CUDA)
-- All 60 existing tests pass, typecheck passes
-- Files changed: submodules/triton/third_party/proton/csrc/lib/Profiler/GPUProfiler.cpp, scripts/ralph/prd.json, scripts/ralph/progress.txt
-- **Learnings for future iterations:**
-  - Proton periodic flushing has a one-phase delay: current phase is never flushed, only previous phases are flushed during deactivate
-  - First output file only appears after the SECOND start/stop cycle (not the first)
-  - Mode string "periodic_flushing" alone triggers a segfault in unpatched Proton — always needs the C++ fix or explicit format suffix like "periodic_flushing:format=hatchet"
-  - Worker crashes from Proton segfaults show as "Worker proc died unexpectedly" in executor logs — look for "Segfault encountered" in full logs
-  - Rebuilding proton: `cd submodules/triton/build/cmake.linux-x86_64-cpython-3.12 && ninja proton`
+  - The sanity_check.sh script tests both nano-vllm and vLLM; for quick single-framework verification, call the helper script directly: `python scripts/profiling/helpers/vllm_offline_run.py`
+  - Proton profile output shows `execute_context_*` entries with `<captured_at>` sub-entries when CUDA graph capture is profiled — this confirms the early-start fix is working
+  - The H100 GPU captures 51 CUDA graph sizes for both PIECEWISE and FULL modes
 ---

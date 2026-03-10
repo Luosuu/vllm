@@ -39,7 +39,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.profiler.wrapper import (
+    CudaProfilerWrapper,
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
@@ -517,9 +521,25 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        # Start Proton session early so it tracks CUDA graph capture activity.
+        # This prevents the "Cannot find graph for graphExecId" warning by
+        # ensuring Proton's session exists before graph capture begins.
+        if self.profiler_config.profiler == "proton" and self.profiler is None:
+            output_dir = self.profiler_config.proton_profiler_dir
+            self.profiler = ProtonProfilerWrapper(
+                self.profiler_config,
+                output_dir=output_dir,
+                local_rank=self.local_rank,
+            )
+            self.profiler.start_and_deactivate()
+
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        # Deactivate the early-started Proton session after capture completes.
+        if isinstance(self.profiler, ProtonProfilerWrapper) and self.profiler._session_id is not None and not self.profiler._running:
+            self.profiler.deactivate_early()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -786,8 +806,6 @@ class Worker(WorkerBase):
                         "Starting torch profiler with trace name: %s", trace_name
                     )
                 elif profiler_type == "proton":
-                    from vllm.profiler.wrapper import ProtonProfilerWrapper
-
                     # proton_profiler_dir is required by validation
                     output_dir = self.profiler_config.proton_profiler_dir
                     self.profiler = ProtonProfilerWrapper(

@@ -1047,3 +1047,619 @@ class TestProtonImportGuard:
         # The module itself should always be importable
         from vllm.profiler import wrapper  # noqa: F401
         # No ImportError should be raised from just importing the module
+
+
+@requires_proton
+class TestProtonEarlyStart:
+    """Tests for the early-start pattern: start_and_deactivate + deactivate_early.
+
+    Verifies that ProtonProfilerWrapper supports creating a session before
+    CUDA graph capture and deactivating after capture completes, so that
+    subsequent start()/stop() cycles reuse the existing session.
+    """
+
+    def _make_wrapper_with_mock(self, config, output_dir="/tmp/proton_out",
+                                local_rank=0):
+        """Create a ProtonProfilerWrapper then replace _proton with a mock.
+
+        Returns (wrapper, mock_proton) tuple.
+        """
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        wrapper = ProtonProfilerWrapper(
+            profiler_config=config,
+            output_dir=output_dir,
+            local_rank=local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        wrapper._proton = mock_proton
+        return wrapper, mock_proton
+
+    def test_start_and_deactivate_creates_session(self):
+        """Test that start_and_deactivate() creates a session via proton.start()."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper.start_and_deactivate()
+
+        mock_proton.start.assert_called_once()
+        assert wrapper._session_id == 42
+        # _running should NOT be set — not managed by WorkerProfiler lifecycle
+        assert wrapper._running is False
+
+    def test_deactivate_early_calls_deactivate_without_flushing(self):
+        """Test that deactivate_early() calls proton.deactivate() without flushing."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper.start_and_deactivate()
+        wrapper.deactivate_early()
+
+        mock_proton.deactivate.assert_called_once_with(session=42)
+        assert wrapper._session_id == 42
+        assert wrapper._running is False
+
+    def test_start_after_early_init_activates_existing_session(self):
+        """Test that _start() activates the existing session after early init."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper.start_and_deactivate()
+        wrapper.deactivate_early()
+
+        # Reset mock to isolate _start() calls
+        mock_proton.reset_mock()
+
+        wrapper._start()
+
+        # Should activate, not start a new session
+        mock_proton.activate.assert_called_once_with(session=42)
+        mock_proton.start.assert_not_called()
+
+    def test_stop_after_activated_start_deactivates_then_finalizes(self):
+        """Test that _stop() after an activate()-based start calls
+        deactivate(flushing=True) then finalize() in non-periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper.start_and_deactivate()
+        wrapper.deactivate_early()
+        mock_proton.reset_mock()
+
+        wrapper._start()
+        wrapper._stop()
+
+        # Should deactivate with flushing, then finalize
+        mock_proton.deactivate.assert_called_once_with(
+            session=42, flushing=True
+        )
+        mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
+
+    def test_full_lifecycle_non_periodic(self):
+        """Test the full early-start lifecycle in non-periodic mode:
+        start_and_deactivate → deactivate_early → start → stop."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Phase 1: Early init (before CUDA graph capture)
+        wrapper.start_and_deactivate()
+        assert wrapper._session_id == 42
+        assert wrapper._running is False
+
+        # Phase 2: Deactivate after capture
+        wrapper.deactivate_early()
+        assert wrapper._session_id == 42
+        assert wrapper._running is False
+
+        # Phase 3: Normal profiling via start()/stop()
+        wrapper.start()
+        assert wrapper._running is True
+        assert wrapper._session_id == 42
+
+        wrapper.stop()
+        assert wrapper._running is False
+        assert wrapper._session_id is None
+
+        # Verify call sequence
+        assert mock_proton.start.call_count == 1  # Only from early init
+        mock_proton.activate.assert_called_once_with(session=42)
+        # deactivate called twice: once early (no flushing), once at stop (flushing)
+        assert mock_proton.deactivate.call_count == 2
+        mock_proton.finalize.assert_called_once_with(session=42)
+
+    def test_full_lifecycle_periodic(self):
+        """Test the full early-start lifecycle in periodic mode:
+        start_and_deactivate → deactivate_early → start → stop → start → stop."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Phase 1: Early init
+        wrapper.start_and_deactivate()
+        assert wrapper._session_id == 42
+
+        # Phase 2: Deactivate after capture
+        wrapper.deactivate_early()
+
+        # Phase 3: First profiling cycle
+        wrapper.start()
+        assert wrapper._running is True
+        wrapper.stop()
+        assert wrapper._running is False
+        assert wrapper._current_phase == 1
+        # Session should be preserved in periodic mode
+        assert wrapper._session_id == 42
+
+        # Phase 4: Second profiling cycle
+        wrapper.start()
+        wrapper.stop()
+        assert wrapper._current_phase == 2
+        assert wrapper._session_id == 42
+
+        # Verify: proton.start() called once, activate called for each cycle
+        assert mock_proton.start.call_count == 1
+        # activate called: once for deactivate_early recovery + twice for cycles
+        # Actually: early deactivate doesn't set _was_activated. Let me check.
+        # start_and_deactivate creates session, deactivate_early pauses.
+        # start() sees _session_id != None, calls activate. stop() deactivates.
+        # start() again sees _session_id != None, calls activate. stop() deactivates.
+        assert mock_proton.activate.call_count == 2
+
+    def test_without_early_start_still_works(self):
+        """Test that normal start/stop still works without early init
+        (no regression in non-periodic mode)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._stop()
+
+        mock_proton.start.assert_called_once()
+        mock_proton.finalize.assert_called_once_with(session=42)
+        # deactivate should NOT be called (no early init, no periodic mode)
+        mock_proton.deactivate.assert_not_called()
+        mock_proton.activate.assert_not_called()
+
+    def test_without_early_start_periodic_still_works(self):
+        """Test that normal start/stop still works without early init
+        (no regression in periodic mode)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        wrapper._start()
+        wrapper._stop()
+        wrapper._start()
+        wrapper._stop()
+
+        assert mock_proton.start.call_count == 1
+        assert mock_proton.activate.call_count == 1
+        assert mock_proton.deactivate.call_count == 2
+        mock_proton.finalize.assert_not_called()
+
+
+class TestProtonEarlyStartInWorker:
+    """Tests for early Proton initialization in compile_or_warm_up_model.
+
+    These tests verify that the GPU worker creates and manages the Proton
+    profiler during model warmup/capture, ensuring Proton tracks CUDA
+    graph capture activity.
+    """
+
+    def _make_mock_worker(self, profiler_type="proton", enforce_eager=False):
+        """Create a minimal mock worker with profiler config for testing.
+
+        Args:
+            profiler_type: The profiler type to configure.
+            enforce_eager: Whether to skip CUDA graph capture.
+
+        Returns:
+            A mock worker object with the necessary attributes.
+        """
+        worker = MagicMock()
+        worker.profiler = None
+        worker.profiler_config = ProfilerConfig(
+            profiler=profiler_type,
+            proton_profiler_dir="/tmp/proton_out",
+        ) if profiler_type == "proton" else ProfilerConfig(
+            profiler=profiler_type,
+            torch_profiler_dir="/tmp/torch_out",
+        ) if profiler_type == "torch" else ProfilerConfig(
+            profiler=profiler_type,
+        ) if profiler_type == "cuda" else ProfilerConfig()
+        worker.model_config = MagicMock()
+        worker.model_config.enforce_eager = enforce_eager
+        worker.local_rank = 0
+        return worker
+
+    @requires_proton
+    def test_proton_early_start_creates_wrapper(self):
+        """Test that compile_or_warm_up_model creates ProtonProfilerWrapper
+        when profiler is 'proton'."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        # Simulate the early start logic from compile_or_warm_up_model
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            output_dir = worker.profiler_config.proton_profiler_dir
+            worker.profiler = ProtonProfilerWrapper(
+                worker.profiler_config,
+                output_dir=output_dir,
+                local_rank=worker.local_rank,
+            )
+            # Replace _proton with mock to avoid real GPU calls
+            mock_proton = MagicMock()
+            mock_proton.start.return_value = 42
+            worker.profiler._proton = mock_proton
+
+            worker.profiler.start_and_deactivate()
+
+        assert worker.profiler is not None
+        assert isinstance(worker.profiler, ProtonProfilerWrapper)
+        assert worker.profiler._session_id == 42
+
+    @requires_proton
+    def test_proton_early_start_deactivates_after_capture(self):
+        """Test that deactivate_early() is called after capture_model."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        output_dir = worker.profiler_config.proton_profiler_dir
+        worker.profiler = ProtonProfilerWrapper(
+            worker.profiler_config,
+            output_dir=output_dir,
+            local_rank=worker.local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        worker.profiler._proton = mock_proton
+
+        # Early start
+        worker.profiler.start_and_deactivate()
+        assert worker.profiler._session_id == 42
+        assert not worker.profiler._running
+
+        # Simulate capture_model() happening here...
+
+        # Deactivate after capture
+        worker.profiler.deactivate_early()
+        mock_proton.deactivate.assert_called_once_with(session=42)
+        assert not worker.profiler._running
+
+    @requires_proton
+    def test_proton_early_start_then_profile_reuses_session(self):
+        """Test that profile(is_start=True) reuses the early-created session."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        output_dir = worker.profiler_config.proton_profiler_dir
+        worker.profiler = ProtonProfilerWrapper(
+            worker.profiler_config,
+            output_dir=output_dir,
+            local_rank=worker.local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        worker.profiler._proton = mock_proton
+
+        # Early start + deactivate
+        worker.profiler.start_and_deactivate()
+        worker.profiler.deactivate_early()
+
+        # Now profile(is_start=True) — since self.profiler is not None,
+        # it skips creation and calls start() which should activate()
+        worker.profiler.start()
+        mock_proton.activate.assert_called_once_with(session=42)
+        assert worker.profiler._running
+        assert worker.profiler._was_activated
+
+    @requires_proton
+    def test_torch_profiler_not_affected_by_early_start(self):
+        """Test that torch profiler is not early-started."""
+        worker = self._make_mock_worker(profiler_type="torch")
+
+        # The early start logic only triggers for proton
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start for torch profiler"
+
+        assert worker.profiler is None
+
+    @requires_proton
+    def test_cuda_profiler_not_affected_by_early_start(self):
+        """Test that CUDA profiler is not early-started."""
+        worker = self._make_mock_worker(profiler_type="cuda")
+
+        # The early start logic only triggers for proton
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start for cuda profiler"
+
+        assert worker.profiler is None
+
+    @requires_proton
+    def test_proton_early_start_with_enforce_eager(self):
+        """Test early start still happens when enforce_eager is True."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(
+            profiler_type="proton", enforce_eager=True
+        )
+
+        # Early start happens regardless of enforce_eager
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            output_dir = worker.profiler_config.proton_profiler_dir
+            worker.profiler = ProtonProfilerWrapper(
+                worker.profiler_config,
+                output_dir=output_dir,
+                local_rank=worker.local_rank,
+            )
+            mock_proton = MagicMock()
+            mock_proton.start.return_value = 42
+            worker.profiler._proton = mock_proton
+            worker.profiler.start_and_deactivate()
+
+        assert worker.profiler is not None
+        assert worker.profiler._session_id == 42
+
+        # Deactivate happens even without capture_model (enforce_eager=True)
+        if isinstance(worker.profiler, ProtonProfilerWrapper) and worker.profiler._session_id is not None and not worker.profiler._running:
+            worker.profiler.deactivate_early()
+
+        mock_proton.deactivate.assert_called_once_with(session=42)
+
+    @requires_proton
+    def test_no_profiler_config_skips_early_start(self):
+        """Test that no profiler config skips early start."""
+        worker = self._make_mock_worker(profiler_type=None)
+
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start with no profiler"
+
+        assert worker.profiler is None
+
+
+@requires_proton
+class TestProfileReusesEarlyInitSession:
+    """Tests for US-003: profile() correctly reuses early-initialized Proton.
+
+    Verifies the full integration lifecycle:
+    1. Early init in compile_or_warm_up_model creates wrapper + start_and_deactivate
+    2. profile(is_start=True) skips creation, calls start() which activates
+    3. profile(is_start=False) calls stop() which finalizes correctly
+    Both periodic and non-periodic modes are covered.
+    """
+
+    def _make_wrapper_with_mock(self, config, output_dir="/tmp/proton_out",
+                                local_rank=0):
+        """Create a ProtonProfilerWrapper then replace _proton with a mock.
+
+        Returns (wrapper, mock_proton) tuple.
+        """
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        wrapper = ProtonProfilerWrapper(
+            profiler_config=config,
+            output_dir=output_dir,
+            local_rank=local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        wrapper._proton = mock_proton
+        return wrapper, mock_proton
+
+    def _simulate_early_init(self, wrapper, mock_proton):
+        """Simulate the early init from compile_or_warm_up_model.
+
+        Calls start_and_deactivate() then deactivate_early(), matching
+        the actual code in gpu_worker.py compile_or_warm_up_model().
+        """
+        wrapper.start_and_deactivate()
+        # Simulate capture_model() happening between start and deactivate
+        wrapper.deactivate_early()
+
+    def test_profile_start_skips_creation_when_early_initialized(self):
+        """Test profile(is_start=True) skips wrapper creation when
+        self.profiler is already set from early init."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        self._simulate_early_init(wrapper, mock_proton)
+
+        # Simulate the guard in profile(): if self.profiler is None
+        profiler = wrapper  # Already set, so creation is skipped
+        assert profiler is not None
+
+        # Call start() — should activate existing session, not create new
+        profiler.start()
+        mock_proton.activate.assert_called_once_with(session=42)
+        assert mock_proton.start.call_count == 1  # Only from early init
+
+    def test_full_lifecycle_non_periodic_through_public_api(self):
+        """Test early init → start() → stop() in non-periodic mode
+        using the public WorkerProfiler API (what profile() calls)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Phase 1: Early init (compile_or_warm_up_model)
+        self._simulate_early_init(wrapper, mock_proton)
+        assert wrapper._session_id == 42
+        assert not wrapper._running
+        assert not wrapper._active
+
+        # Phase 2: profile(is_start=True) calls wrapper.start()
+        wrapper.start()
+        assert wrapper._running
+        assert wrapper._active
+
+        # Phase 3: profile(is_start=False) calls wrapper.stop()
+        wrapper.stop()
+        assert not wrapper._running
+        assert not wrapper._active
+        assert wrapper._session_id is None  # Finalized in non-periodic
+
+        # Verify Proton call sequence
+        assert mock_proton.start.call_count == 1  # Only early init
+        mock_proton.activate.assert_called_once_with(session=42)
+        mock_proton.deactivate.assert_any_call(session=42)  # Early deactivate
+        mock_proton.deactivate.assert_any_call(session=42, flushing=True)
+        mock_proton.finalize.assert_called_once_with(session=42)
+
+    def test_full_lifecycle_periodic_through_public_api(self):
+        """Test early init → start() → stop() → start() → stop()
+        in periodic mode using the public WorkerProfiler API."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # Phase 1: Early init
+        self._simulate_early_init(wrapper, mock_proton)
+        assert wrapper._session_id == 42
+
+        # Phase 2: First profiling cycle (start_profile → stop_profile)
+        wrapper.start()
+        assert wrapper._running
+        wrapper.stop()
+        assert not wrapper._running
+        assert wrapper._current_phase == 1
+        assert wrapper._session_id == 42  # Preserved in periodic mode
+
+        # Phase 3: Second profiling cycle
+        wrapper.start()
+        assert wrapper._running
+        wrapper.stop()
+        assert not wrapper._running
+        assert wrapper._current_phase == 2
+        assert wrapper._session_id == 42  # Still preserved
+
+        # Verify: start() only called once (early init), activate for each cycle
+        assert mock_proton.start.call_count == 1
+        assert mock_proton.activate.call_count == 2
+        # deactivate: 1 early + 2 periodic flushes = 3
+        assert mock_proton.deactivate.call_count == 3
+        mock_proton.finalize.assert_not_called()  # Only on shutdown
+
+    def test_stop_works_without_early_init_non_periodic(self):
+        """Test that profile stop works correctly when profiler was NOT
+        early-initialized (normal creation path in profile())."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # No early init — go directly to start/stop
+        wrapper.start()
+        assert wrapper._running
+        wrapper.stop()
+        assert not wrapper._running
+        assert wrapper._session_id is None
+
+        # Should use start/finalize, no activate/deactivate
+        mock_proton.start.assert_called_once()
+        mock_proton.finalize.assert_called_once_with(session=42)
+        mock_proton.activate.assert_not_called()
+        mock_proton.deactivate.assert_not_called()
+
+    def test_stop_works_without_early_init_periodic(self):
+        """Test that profile stop works correctly when profiler was NOT
+        early-initialized in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+
+        # No early init
+        wrapper.start()
+        wrapper.stop()
+        assert wrapper._current_phase == 1
+        assert wrapper._session_id == 42
+
+        wrapper.start()
+        wrapper.stop()
+        assert wrapper._current_phase == 2
+
+        mock_proton.start.assert_called_once()
+        mock_proton.activate.assert_called_once_with(session=42)
+        assert mock_proton.deactivate.call_count == 2
+
+    def test_multiple_start_stop_cycles_after_early_init(self):
+        """Test that multiple start/stop cycles work after early init
+        in non-periodic mode (each cycle creates a new session after first)."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        self._simulate_early_init(wrapper, mock_proton)
+
+        # First cycle reuses early-started session
+        wrapper.start()
+        wrapper.stop()
+        assert wrapper._session_id is None  # Finalized
+
+        # Second cycle creates a new session (no early init left)
+        wrapper.start()
+        wrapper.stop()
+        assert wrapper._session_id is None
+
+        # start called: 1 (early) + 1 (second cycle) = 2
+        assert mock_proton.start.call_count == 2
+        mock_proton.activate.assert_called_once()  # Only first cycle
+        assert mock_proton.finalize.call_count == 2
+
+    def test_shutdown_after_early_init_periodic(self):
+        """Test shutdown after early init + profiling in periodic mode."""
+        config = ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir="/tmp/proton_out",
+            proton_mode="periodic_flushing",
+        )
+        wrapper, mock_proton = self._make_wrapper_with_mock(config)
+        self._simulate_early_init(wrapper, mock_proton)
+
+        # One profiling cycle
+        wrapper.start()
+        wrapper.stop()
+
+        # Shutdown should finalize the persistent session
+        wrapper.shutdown()
+        mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None

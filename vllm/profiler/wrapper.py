@@ -387,6 +387,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._current_phase: int = 0
         self._output_files: list[str] = []
 
+        # Tracks whether the current cycle was started via activate()
+        # (from an early-started session) rather than proton.start().
+        # Used in non-periodic _stop() to call deactivate before finalize.
+        self._was_activated: bool = False
+
         if local_rank in (None, 0):
             mode_label = "periodic" if self._periodic_mode else "non-periodic"
             logger.info_once(
@@ -418,31 +423,52 @@ class ProtonProfilerWrapper(WorkerProfiler):
             hook=self._hook,
         )
 
+    def start_and_deactivate(self) -> None:
+        """Create a Proton session for early initialization.
+
+        Creates the session via proton.start() so that Proton tracks
+        GPU activity (e.g., CUDA graph capture) from this point forward.
+        The caller must later call deactivate_early() to pause the session,
+        and the normal start()/stop() API to resume profiling.
+
+        This method does NOT set _running — the session is active at the
+        Proton level but not yet managed by the WorkerProfiler lifecycle.
+        """
+        self._session_id = self._create_session()
+
+    def deactivate_early(self) -> None:
+        """Pause the early-started Proton session without flushing data.
+
+        Calls proton.deactivate() without flushing so the session can be
+        reactivated later via the normal start() API. After this call,
+        _session_id is set but _running is False.
+        """
+        self._proton.deactivate(session=self._session_id)
+
     @override
     def _start(self) -> None:
         """Start or reactivate a Proton profiling session.
 
-        Non-periodic mode: Creates a new session via proton.start().
-        Periodic mode: Creates a session on the first call, then
-        reactivates the existing session via proton.activate() on
-        subsequent calls.
+        If a session already exists (from start_and_deactivate() or a
+        previous periodic cycle), reactivates it via proton.activate().
+        Otherwise creates a new session via proton.start().
         """
-        if self._periodic_mode:
-            if self._session_id is None:
-                # First call — create the session (proton.start activates it)
-                self._session_id = self._create_session()
-            else:
-                # Subsequent calls — reactivate existing session
-                self._proton.activate(session=self._session_id)
+        if self._session_id is not None:
+            # Reactivate existing session (early-started or periodic reuse)
+            self._proton.activate(session=self._session_id)
+            self._was_activated = True
         else:
-            # Non-periodic: create a new session each cycle
+            # Create a new session
             self._session_id = self._create_session()
+            self._was_activated = False
 
     @override
     def _stop(self) -> None:
         """Stop or deactivate the Proton profiling session.
 
         Non-periodic mode: Finalizes the session and writes output.
+        If the session was reactivated (via activate()), deactivates
+        with flushing first to flush profiling data before finalize.
         Periodic mode: Deactivates the session with flushing=True to
         write per-phase .part_N output files. The session is preserved
         for reuse; finalize() is only called on shutdown().
@@ -458,10 +484,15 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._current_phase += 1
             # Session is preserved — not cleared
         else:
-            # Non-periodic: finalize and clear session
+            # Non-periodic: deactivate if activated, then finalize
+            if self._was_activated:
+                self._proton.deactivate(
+                    session=self._session_id, flushing=True
+                )
             self._proton.finalize(session=self._session_id)
             self._scan_output_files()
             self._session_id = None
+            self._was_activated = False
 
     def _scan_output_files(self) -> None:
         """Scan proton_profiler_dir for output files matching this rank.
