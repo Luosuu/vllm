@@ -230,7 +230,6 @@ def main():
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", args.model,
         "--port", str(args.port),
-        "--enforce-eager",
         "--max-model-len", str(args.max_model_len),
         "--profiler-config", profiler_config,
     ]

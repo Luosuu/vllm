@@ -78,7 +78,7 @@ def main():
     print(f"Loading model: {args.model}")
     llm = LLM(
         model=args.model,
-        enforce_eager=True,
+        enforce_eager=False,
         max_model_len=args.max_model_len,
         profiler_config=profiler_config,
     )

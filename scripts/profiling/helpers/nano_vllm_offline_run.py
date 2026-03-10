@@ -5,10 +5,24 @@ profiling enabled, then outputs .hatchet files to the specified directory.
 """
 
 import argparse
+import os
 import sys
 
+from huggingface_hub import snapshot_download
 from nanovllm import LLM, SamplingParams
 from nanovllm.profiler import ProtonProfiler, set_profiler
+
+
+def resolve_model_path(model: str) -> str:
+    """Resolve a HuggingFace model ID to a local directory path.
+
+    nano-vllm requires a local directory path, not a HuggingFace model ID.
+    If the model is already a local path, return it as-is.
+    """
+    if os.path.isdir(model):
+        return model
+    # Download or use cached snapshot
+    return snapshot_download(model)
 
 
 def main():
@@ -75,8 +89,9 @@ def main():
     )
     set_profiler(profiler)
 
-    print(f"Loading model: {args.model}")
-    llm = LLM(args.model, enforce_eager=True, max_model_len=args.max_model_len)
+    model_path = resolve_model_path(args.model)
+    print(f"Loading model: {args.model} (path: {model_path})")
+    llm = LLM(model_path, enforce_eager=True, max_model_len=args.max_model_len)
 
     # Simple prompts for sanity check
     prompts = [
@@ -86,7 +101,8 @@ def main():
         "List three colors:",
     ][: args.num_prompts]
 
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=args.max_tokens)
+    # nano-vllm does not support greedy (temperature=0.0)
+    sampling_params = SamplingParams(temperature=0.8, max_tokens=args.max_tokens)
 
     # Warmup run (no profiling)
     print("Running warmup...")
