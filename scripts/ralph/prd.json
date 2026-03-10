@@ -36,7 +36,7 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on US-001. Key sequence: proton.start() → warmup + capture_model() → proton.deactivate(). The existing profile() method already guards with 'if self.profiler is None' so it will reuse the early-created wrapper."
     },
     {

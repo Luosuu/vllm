@@ -22,6 +22,7 @@ Started: 2026-03-10
 - `compile_or_warm_up_model()` sequence: warmup runs → kernel_warmup → capture_model()
 - Early-start pattern: `start_and_deactivate()` → GPU activity → `deactivate_early()` → normal `start()`/`stop()` reuses session via `activate()`
 - `_was_activated` flag tracks whether current cycle was started via `activate()` (affects `_stop()` behavior in non-periodic mode)
+- Early Proton start is wired in `compile_or_warm_up_model()` between `kernel_warmup()` and `capture_model()` — profiler stored in `self.profiler` for reuse by `profile()`
 ---
 
 ## 2026-03-10 - US-001
@@ -35,4 +36,16 @@ Started: 2026-03-10
   - The `_start()` refactor unified periodic and non-periodic session reuse logic — both now check `_session_id is not None` to decide activate vs start
   - `_was_activated` flag is essential for non-periodic `_stop()` — without it, finalize alone would miss flushing profiling data
   - All 68 existing + new tests pass; no regressions in periodic or non-periodic modes
+---
+
+## 2026-03-10 - US-002
+- Wired early Proton start in `compile_or_warm_up_model()`: creates ProtonProfilerWrapper and calls `start_and_deactivate()` before `capture_model()`, then `deactivate_early()` after capture
+- Moved `ProtonProfilerWrapper` import from lazy (inside `profile()`) to top-level import in gpu_worker.py
+- Added 7 unit tests in TestProtonEarlyStartInWorker class covering: wrapper creation, deactivation after capture, session reuse via profile(), torch/cuda unaffected, enforce_eager mode, no-profiler-config case
+- Files changed: `vllm/v1/worker/gpu_worker.py`, `tests/v1/worker/test_proton_profiler.py`
+- **Learnings for future iterations:**
+  - The deactivation guard uses `isinstance(self.profiler, ProtonProfilerWrapper)` + `_session_id is not None` + `not _running` to safely detect early-started state
+  - Early start is placed after `kernel_warmup()` but before `capture_model()` — this is the correct position because kernel warmup doesn't involve CUDA graphs
+  - The `profile()` method's `if self.profiler is None` guard at line 796 naturally skips re-creation when the profiler was early-initialized
+  - All 75 tests pass (68 existing + 7 new); no typecheck regressions
 ---
