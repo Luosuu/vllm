@@ -1,130 +1,73 @@
 {
-  "project": "vLLM Proton Profiling Study",
+  "project": "vLLM Proton Early Start Fix",
   "branchName": "ralph/proton-profiling-study",
-  "description": "Reproducible performance profiling study comparing vLLM and nano-vllm using Triton's Proton profiler on 1x H100 80GB",
+  "description": "Fix Proton 'Cannot find graph for graphExecId' warning by starting Proton session before CUDA graph capture and deactivating after capture completes",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Sanity check with Qwen3-0.6B",
-      "description": "As a researcher, I want to validate profiling scripts with a small model first so that I can catch issues before committing to expensive 32B runs.",
+      "title": "Add start_and_deactivate method to ProtonProfilerWrapper",
+      "description": "As a developer, I want ProtonProfilerWrapper to support creating a session and later deactivating it so that the GPU worker can start Proton before CUDA graph capture and deactivate after capture completes.",
       "acceptanceCriteria": [
-        "Script scripts/profiling/sanity_check.sh profiles both nano-vllm and vLLM with Qwen3-0.6B on 1 GPU",
-        "Runs one profiling configuration (shadow+tree) for each framework",
-        "Output .hatchet files are loadable by proton-viewer without errors",
-        "Script completes in under 5 minutes",
-        "Script prints pass/fail summary indicating whether both frameworks produced valid profiles",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
+        "Add a public method start_and_deactivate() to ProtonProfilerWrapper in vllm/profiler/wrapper.py",
+        "start_and_deactivate() calls _create_session() to create the Proton session via proton.start()",
+        "start_and_deactivate() does NOT immediately deactivate — the caller controls when to deactivate",
+        "Add a public method deactivate_early() that calls proton.deactivate() WITHOUT flushing to pause the session",
+        "After start_and_deactivate() + deactivate_early(), internal state has _session_id set and _running is False",
+        "Subsequent calls to _start() detect existing _session_id and call proton.activate() instead of proton.start() (for both periodic and non-periodic modes)",
+        "In non-periodic mode, _stop() after an activate()-based start calls proton.deactivate(flushing=True) then proton.finalize(), not just proton.finalize()",
+        "Unit tests cover: start_and_deactivate then deactivate_early then _start activates existing session then _stop finalizes",
+        "Unit tests cover: both periodic and non-periodic modes work correctly with the early-start pattern",
+        "Typecheck passes"
       ],
       "priority": 1,
       "passes": true,
-      "notes": ""
+      "notes": "This is the core wrapper change. The two-method split (start_and_deactivate + deactivate_early) lets the GPU worker keep Proton active during CUDA graph capture and deactivate only after capture completes."
     },
     {
       "id": "US-002",
-      "title": "Offline batch profiling scripts for nano-vllm",
-      "description": "As a researcher, I want shell scripts that profile nano-vllm batch inference with Qwen3-32B so that I can reproduce the profiling runs.",
+      "title": "Wire early Proton start in GPU worker compile_or_warm_up_model",
+      "description": "As a developer profiling vLLM with Proton, I want the Proton session started before CUDA graph capture and deactivated after capture so that Proton tracks graph creation without the 'Cannot find graph' warning.",
       "acceptanceCriteria": [
-        "Script scripts/profiling/nano_vllm_offline.sh profiles nano-vllm's bench.py with Qwen3-32B on 1 GPU",
-        "Script runs 4 profiling configurations: shadow+tree, shadow+trace, python+tree, python+trace",
-        "Each config outputs to a separate subdirectory under profiling_output/nano_vllm/offline/",
-        "Script uses --proton-hook triton to capture Triton kernel metadata",
-        "Workload parameters (batch size, sequence lengths) are configurable via script arguments",
-        "Script prints summary of output files on completion",
-        "Output .hatchet files are loadable by proton-viewer without errors",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
+        "In gpu_worker.py compile_or_warm_up_model(), when profiler_config.profiler == 'proton', create ProtonProfilerWrapper and call start_and_deactivate() BEFORE capture_model() is called",
+        "Call deactivate_early() AFTER capture_model() returns — Proton is active during the entire CUDA graph capture phase",
+        "Store the wrapper in self.profiler so profile(is_start=True) reuses it via the existing 'if self.profiler is None' guard",
+        "Only Proton profiler gets early initialization — torch and cuda profiler types are unaffected",
+        "When enforce_eager is True (no CUDA graph capture), still start and deactivate Proton early for consistency",
+        "Typecheck passes"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "Depends on US-001. Key sequence: proton.start() → warmup + capture_model() → proton.deactivate(). The existing profile() method already guards with 'if self.profiler is None' so it will reuse the early-created wrapper."
     },
     {
       "id": "US-003",
-      "title": "Offline batch profiling scripts for vLLM",
-      "description": "As a researcher, I want shell scripts that profile vLLM batch inference with Qwen3-32B so that I can compare against nano-vllm.",
+      "title": "Ensure profile() reuses early-initialized Proton profiler correctly",
+      "description": "As a developer, I want profile(is_start=True) to correctly activate the deactivated Proton session created during init rather than creating a duplicate.",
       "acceptanceCriteria": [
-        "Script scripts/profiling/vllm_offline.sh profiles vLLM offline inference with Qwen3-32B on 1 GPU",
-        "Uses vLLM's Proton profiler config via --profiler-config JSON",
-        "Runs same 4 profiling configurations as nano-vllm (shadow+tree, shadow+trace, python+tree, python+trace)",
-        "Each config outputs to a separate subdirectory under profiling_output/vllm/offline/",
-        "Matching workload to nano-vllm (same sequence count, input/output lengths, random seed)",
-        "Output .hatchet files are loadable by proton-viewer without errors",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
+        "profile(is_start=True) skips wrapper creation when self.profiler is not None (existing guard at line 776)",
+        "profile(is_start=True) calls self.profiler.start() which internally calls proton.activate() on the existing deactivated session",
+        "profile(is_start=False) calls self.profiler.stop() which works correctly whether session was early-started or not",
+        "Both periodic and non-periodic Proton modes work correctly: start_profile → generate → stop_profile cycle produces valid output",
+        "Unit tests verify the full lifecycle: early init in compile_or_warm_up_model → start_profile → stop_profile",
+        "Typecheck passes"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": ""
+      "passes": false,
+      "notes": "Depends on US-001 and US-002. This story verifies the integration between early init and the existing profile() API. The existing 'if self.profiler is None' guard should handle this naturally."
     },
     {
       "id": "US-004",
-      "title": "Online serving profiling scripts for nano-vllm",
-      "description": "As a researcher, I want to profile nano-vllm under online serving conditions so that I can compare scheduling and batching behavior.",
+      "title": "Verify fix with vllm_offline.sh end-to-end",
+      "description": "As a developer, I want to run the offline profiling script and confirm the Proton warning is eliminated and valid profiles are produced.",
       "acceptanceCriteria": [
-        "Script scripts/profiling/nano_vllm_online.sh profiles nano-vllm with simulated online requests",
-        "Uses periodic flushing mode to capture warmup phase and steady-state phase separately",
-        "Generates per-phase .part_N.hatchet files",
-        "Workload: sequential requests with varying prompt lengths to simulate online traffic",
-        "Output files are loadable by proton-viewer without errors",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
+        "Run scripts/profiling/vllm_offline.sh end-to-end (or sanity_check.sh with a small model)",
+        "No '[PROTON] Cannot find graph for graphExecId' warning in output",
+        "Valid .hatchet output files are produced and loadable by proton-viewer",
+        "Profile output includes CUDA graph capture activity (visible in proton-viewer output)"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-005",
-      "title": "Online serving profiling scripts for vLLM",
-      "description": "As a researcher, I want to profile vLLM under online serving conditions with periodic flushing.",
-      "acceptanceCriteria": [
-        "Script scripts/profiling/vllm_online.sh profiles vLLM serving with Proton periodic flushing",
-        "Uses vLLM's REST API (/start_profile, /stop_profile) to control profiling phases",
-        "Captures warmup phase and steady-state phase separately",
-        "Matching workload to nano-vllm online script",
-        "Output files are loadable by proton-viewer without errors",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": "Depends on US-004 (nano-vllm online scripts define the workload that vLLM must match)"
-    },
-    {
-      "id": "US-006",
-      "title": "Profile analysis with proton-viewer",
-      "description": "As a researcher, I want to analyze all captured profiles and extract key metrics so that I can compare the two frameworks quantitatively.",
-      "acceptanceCriteria": [
-        "Script scripts/profiling/analyze_profiles.sh runs proton-viewer on all .hatchet files",
-        "Extracts and prints: top-10 kernels by time, total GPU time, kernel count",
-        "Compares vLLM vs nano-vllm side by side for each profiling mode",
-        "Saves proton-viewer output to profiling_output/analysis/ as text files",
-        "Chrome trace files (.chrome_trace) listed with instructions to open in Perfetto",
-        "For periodic flushing profiles, compares warmup phase vs steady-state phase",
-        "Script activates venv via . .venv/bin/activate before running Python",
-        "Tests pass"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "Depends on US-002, US-003, US-004, US-005 (requires profile output files)"
-    },
-    {
-      "id": "US-007",
-      "title": "Summary report and reproducibility",
-      "description": "As a researcher, I want a summary report with all findings and a master script to reproduce the entire study.",
-      "acceptanceCriteria": [
-        "Master script scripts/profiling/run_all.sh runs all profiling scripts in sequence (sanity check first, then offline, online, analysis)",
-        "Summary report scripts/profiling/README.md documents: hardware setup, model, workload parameters, how to run, key findings",
-        "Report includes quantitative comparison table: throughput, top kernel times, scheduling overhead",
-        "Report includes observations about shadow vs python context differences",
-        "Report includes observations about tree vs trace format trade-offs",
-        "Report includes periodic flushing warmup vs steady-state comparison",
-        "All output directories and file naming conventions documented"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": "Depends on US-006 (requires analysis output)"
+      "passes": false,
+      "notes": "Depends on US-002 and US-003. This is a manual verification story — run the actual profiling script and check output."
     }
   ]
 }
