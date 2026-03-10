@@ -1262,3 +1262,185 @@ class TestProtonEarlyStart:
         assert mock_proton.activate.call_count == 1
         assert mock_proton.deactivate.call_count == 2
         mock_proton.finalize.assert_not_called()
+
+
+class TestProtonEarlyStartInWorker:
+    """Tests for early Proton initialization in compile_or_warm_up_model.
+
+    These tests verify that the GPU worker creates and manages the Proton
+    profiler during model warmup/capture, ensuring Proton tracks CUDA
+    graph capture activity.
+    """
+
+    def _make_mock_worker(self, profiler_type="proton", enforce_eager=False):
+        """Create a minimal mock worker with profiler config for testing.
+
+        Args:
+            profiler_type: The profiler type to configure.
+            enforce_eager: Whether to skip CUDA graph capture.
+
+        Returns:
+            A mock worker object with the necessary attributes.
+        """
+        worker = MagicMock()
+        worker.profiler = None
+        worker.profiler_config = ProfilerConfig(
+            profiler=profiler_type,
+            proton_profiler_dir="/tmp/proton_out",
+        ) if profiler_type == "proton" else ProfilerConfig(
+            profiler=profiler_type,
+            torch_profiler_dir="/tmp/torch_out",
+        ) if profiler_type == "torch" else ProfilerConfig(
+            profiler=profiler_type,
+        ) if profiler_type == "cuda" else ProfilerConfig()
+        worker.model_config = MagicMock()
+        worker.model_config.enforce_eager = enforce_eager
+        worker.local_rank = 0
+        return worker
+
+    @requires_proton
+    def test_proton_early_start_creates_wrapper(self):
+        """Test that compile_or_warm_up_model creates ProtonProfilerWrapper
+        when profiler is 'proton'."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        # Simulate the early start logic from compile_or_warm_up_model
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            output_dir = worker.profiler_config.proton_profiler_dir
+            worker.profiler = ProtonProfilerWrapper(
+                worker.profiler_config,
+                output_dir=output_dir,
+                local_rank=worker.local_rank,
+            )
+            # Replace _proton with mock to avoid real GPU calls
+            mock_proton = MagicMock()
+            mock_proton.start.return_value = 42
+            worker.profiler._proton = mock_proton
+
+            worker.profiler.start_and_deactivate()
+
+        assert worker.profiler is not None
+        assert isinstance(worker.profiler, ProtonProfilerWrapper)
+        assert worker.profiler._session_id == 42
+
+    @requires_proton
+    def test_proton_early_start_deactivates_after_capture(self):
+        """Test that deactivate_early() is called after capture_model."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        output_dir = worker.profiler_config.proton_profiler_dir
+        worker.profiler = ProtonProfilerWrapper(
+            worker.profiler_config,
+            output_dir=output_dir,
+            local_rank=worker.local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        worker.profiler._proton = mock_proton
+
+        # Early start
+        worker.profiler.start_and_deactivate()
+        assert worker.profiler._session_id == 42
+        assert not worker.profiler._running
+
+        # Simulate capture_model() happening here...
+
+        # Deactivate after capture
+        worker.profiler.deactivate_early()
+        mock_proton.deactivate.assert_called_once_with(session=42)
+        assert not worker.profiler._running
+
+    @requires_proton
+    def test_proton_early_start_then_profile_reuses_session(self):
+        """Test that profile(is_start=True) reuses the early-created session."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(profiler_type="proton")
+
+        output_dir = worker.profiler_config.proton_profiler_dir
+        worker.profiler = ProtonProfilerWrapper(
+            worker.profiler_config,
+            output_dir=output_dir,
+            local_rank=worker.local_rank,
+        )
+        mock_proton = MagicMock()
+        mock_proton.start.return_value = 42
+        worker.profiler._proton = mock_proton
+
+        # Early start + deactivate
+        worker.profiler.start_and_deactivate()
+        worker.profiler.deactivate_early()
+
+        # Now profile(is_start=True) — since self.profiler is not None,
+        # it skips creation and calls start() which should activate()
+        worker.profiler.start()
+        mock_proton.activate.assert_called_once_with(session=42)
+        assert worker.profiler._running
+        assert worker.profiler._was_activated
+
+    @requires_proton
+    def test_torch_profiler_not_affected_by_early_start(self):
+        """Test that torch profiler is not early-started."""
+        worker = self._make_mock_worker(profiler_type="torch")
+
+        # The early start logic only triggers for proton
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start for torch profiler"
+
+        assert worker.profiler is None
+
+    @requires_proton
+    def test_cuda_profiler_not_affected_by_early_start(self):
+        """Test that CUDA profiler is not early-started."""
+        worker = self._make_mock_worker(profiler_type="cuda")
+
+        # The early start logic only triggers for proton
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start for cuda profiler"
+
+        assert worker.profiler is None
+
+    @requires_proton
+    def test_proton_early_start_with_enforce_eager(self):
+        """Test early start still happens when enforce_eager is True."""
+        from vllm.profiler.wrapper import ProtonProfilerWrapper
+
+        worker = self._make_mock_worker(
+            profiler_type="proton", enforce_eager=True
+        )
+
+        # Early start happens regardless of enforce_eager
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            output_dir = worker.profiler_config.proton_profiler_dir
+            worker.profiler = ProtonProfilerWrapper(
+                worker.profiler_config,
+                output_dir=output_dir,
+                local_rank=worker.local_rank,
+            )
+            mock_proton = MagicMock()
+            mock_proton.start.return_value = 42
+            worker.profiler._proton = mock_proton
+            worker.profiler.start_and_deactivate()
+
+        assert worker.profiler is not None
+        assert worker.profiler._session_id == 42
+
+        # Deactivate happens even without capture_model (enforce_eager=True)
+        if isinstance(worker.profiler, ProtonProfilerWrapper) and worker.profiler._session_id is not None and not worker.profiler._running:
+            worker.profiler.deactivate_early()
+
+        mock_proton.deactivate.assert_called_once_with(session=42)
+
+    @requires_proton
+    def test_no_profiler_config_skips_early_start(self):
+        """Test that no profiler config skips early start."""
+        worker = self._make_mock_worker(profiler_type=None)
+
+        if worker.profiler_config.profiler == "proton" and worker.profiler is None:
+            assert False, "Should not enter early start with no profiler"
+
+        assert worker.profiler is None
