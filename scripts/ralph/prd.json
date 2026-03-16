@@ -134,7 +134,7 @@
         "Report is self-contained and readable without running scripts"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "This story depends on US-005 analysis output. Parse proton-viewer text files to build report tables"
     }
   ]
