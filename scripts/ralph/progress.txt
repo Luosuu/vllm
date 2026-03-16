@@ -21,6 +21,11 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
 - REPO_ROOT for comparison scripts is 3 levels up from SCRIPT_DIR (comparison/ -> profiling/ -> scripts/ -> repo)
 - vLLM online profiling: `vllm serve` with `--profiler-config` JSON, then `/start_profile` and `/stop_profile` POST to control window
 - vLLM bench serve uses `--random-input-len`/`--random-output-len` and `--request-rate` flags
+- SGLang online profiling requires `--disable-cuda-graph` to avoid CUPTI error 39 (Proton vs CUDA graph subscription conflict)
+- SGLang profiler client: use `--no-cpu --no-gpu --proton` to avoid PyTorch CUDA profiler competing for CUPTI
+- SGLang's _ProfilerProton.stop() was patched to call finalize() for non-persistent sessions (data otherwise never written to disk)
+- SGLang graceful shutdown (kill_process_tree) uses SIGKILL — atexit/finally blocks in scheduler subprocess never fire
+- SGLang bench_serving uses `--random-input`/`--random-output` (no `-len` suffix, unlike vLLM)
 ---
 
 ## 2026-03-16 - US-001
@@ -60,5 +65,22 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
   - Server health check via `curl /health` with retry loop up to 300s works reliably
   - Single .hatchet file accumulates across multiple start/stop cycles (both rates in one file)
   - trap cleanup EXIT pattern ensures server process is killed even on script failure
+---
+
+## 2026-03-16 - US-004
+- Implemented SGLang online serving profiling script at scripts/profiling/comparison/sglang_online.sh
+- Files changed: scripts/profiling/comparison/sglang_online.sh (new), ~/sglang SGLang _ProfilerProton.stop() patch
+- Script runs successfully, produces 2 valid .hatchet files (rate_1 ~22KB, rate_4 ~20KB)
+- Profiles at 2 request rates (1 req/s and 4 req/s) using sglang.profiler + bench_serving
+- **Learnings for future iterations:**
+  - CUPTI error 39 (multiple subscribers) occurs when Proton tries to subscribe after CUDA graph capture
+  - Solution: --disable-cuda-graph on server launch to prevent CUDA graphs from holding CUPTI
+  - Must use --no-cpu --no-gpu with sglang.profiler to avoid PyTorch's CUDA profiler also competing for CUPTI
+  - SGLang's _ProfilerProton.stop() only called deactivate(), never finalize() — data stayed in memory, never written to disk
+  - Patched stop() to accept persistent=True/False parameter; non-persistent sessions now call finalize() which flushes .hatchet
+  - SGLang graceful shutdown uses kill_process_tree() with SIGKILL — atexit/finally blocks never fire in scheduler subprocess
+  - SGLANG_PROTON_CUDA_GRAPH=1 creates persistent session before graph capture (alternative approach, but data only flushes on finalize)
+  - SGLang bench_serving uses --random-input/--random-output (no -len suffix), --backend sglang, --port for server connection
+  - Output files have double .hatchet extension (profiler adds .hatchet to path that already ends in .hatchet)
 ---
 

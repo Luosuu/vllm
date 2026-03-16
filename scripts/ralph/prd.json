@@ -94,7 +94,7 @@
         "Script runs successfully and produces valid .hatchet files"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "SGLang default port is 30000. profiler.py sends /start_profile POST with proton params"
     },
     {
