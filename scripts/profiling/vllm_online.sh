@@ -2,9 +2,9 @@
 # Online serving profiling for vLLM with Proton periodic flushing to capture
 # warmup and steady-state phases separately.
 #
-# Starts a vLLM server, uses REST API (/start_profile, /stop_profile) to
-# control profiling phases, and sends chat completion requests matching the
-# nano-vllm online workload for fair comparison.
+# Starts a vLLM server with profiler config, uses REST API to control profiling
+# phases, and runs `vllm bench serve` to generate workload. Produces per-phase
+# .part_N.hatchet output files.
 #
 # Usage: bash scripts/profiling/vllm_online.sh [OPTIONS]
 #   --model MODEL           Model name or path (default: Qwen/Qwen3-32B)
@@ -45,10 +45,8 @@ done
 # Output base directory
 OUTPUT_BASE="$REPO_ROOT/profiling_output/vllm/online"
 
-# Hook for all configs
+# Profiling settings
 HOOK="triton"
-
-# Profiling context: use shadow for low-overhead phase comparison
 CONTEXT="shadow"
 DATA="tree"
 
@@ -76,6 +74,19 @@ echo "Activating virtual environment..."
 CONFIG_DIR="$OUTPUT_BASE/${CONTEXT}_${DATA}"
 mkdir -p "$CONFIG_DIR"
 
+BASE_URL="http://localhost:$PORT"
+
+# Common bench args for workload generation
+BENCH_ARGS=(
+    --backend vllm
+    --model "$MODEL"
+    --base-url "$BASE_URL"
+    --dataset-name random
+    --input-len "$INPUT_LEN"
+    --output-len "$OUTPUT_LEN"
+    --seed "$SEED"
+)
+
 # Track results
 run_ok=false
 
@@ -85,23 +96,87 @@ echo "  Context: $CONTEXT, Data: $DATA"
 echo "  Output: $CONFIG_DIR"
 echo "--------------------------------------------"
 
-if python "$SCRIPT_DIR/helpers/vllm_online_run.py" \
-    --model "$MODEL" \
-    --output-dir "$CONFIG_DIR" \
-    --context "$CONTEXT" \
-    --data "$DATA" \
-    --hook "$HOOK" \
-    --num-prompts "$NUM_PROMPTS" \
-    --warmup-prompts "$WARMUP_PROMPTS" \
-    --max-tokens "$OUTPUT_LEN" \
-    --max-model-len "$INPUT_LEN" \
-    --seed "$SEED" \
-    --port "$PORT"; then
-    echo "[OK] Online profiling completed"
-    run_ok=true
-else
-    echo "[FAIL] Online profiling failed"
+# --- Start vLLM server in background ---
+echo "Starting vLLM server on port $PORT..."
+vllm serve "$MODEL" \
+    --port "$PORT" \
+    --profiler-config "{
+        \"profiler\": \"proton\",
+        \"proton_profiler_dir\": \"$CONFIG_DIR\",
+        \"proton_context\": \"$CONTEXT\",
+        \"proton_data\": \"$DATA\",
+        \"proton_hook\": \"$HOOK\",
+        \"proton_mode\": \"periodic_flushing\"
+    }" &
+SERVER_PID=$!
+
+# Cleanup function to ensure server is killed on exit
+cleanup() {
+    echo "Shutting down vLLM server (PID $SERVER_PID)..."
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    echo "Server stopped"
+}
+trap cleanup EXIT
+
+# --- Wait for server health ---
+echo "Waiting for server to become healthy..."
+for i in $(seq 1 300); do
+    if curl -s "$BASE_URL/health" > /dev/null 2>&1; then
+        echo "Server ready after ${i}s"
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "ERROR: Server process died"
+        exit 1
+    fi
+    sleep 1
+done
+
+if ! curl -s "$BASE_URL/health" > /dev/null 2>&1; then
+    echo "ERROR: Server did not become healthy within 300s"
+    exit 1
 fi
+
+# --- Unprofiled warmup ---
+echo ""
+echo "Running unprofiled warmup ($WARMUP_PROMPTS prompts)..."
+vllm bench serve "${BENCH_ARGS[@]}" \
+    --num-prompts "$WARMUP_PROMPTS" \
+    --num-warmups 0
+
+# --- Phase 1: Profiled warmup ---
+echo ""
+echo "--- Phase 1: Profiled warmup ($WARMUP_PROMPTS prompts) ---"
+curl -s -X POST "$BASE_URL/start_profile"
+echo " [start_profile]"
+
+vllm bench serve "${BENCH_ARGS[@]}" \
+    --num-prompts "$WARMUP_PROMPTS"
+
+curl -s -X POST "$BASE_URL/stop_profile"
+echo " [stop_profile]"
+
+# --- Phase 2: Steady-state ---
+echo ""
+echo "--- Phase 2: Steady-state ($NUM_PROMPTS prompts) ---"
+curl -s -X POST "$BASE_URL/start_profile"
+echo " [start_profile]"
+
+vllm bench serve "${BENCH_ARGS[@]}" \
+    --num-prompts "$NUM_PROMPTS"
+
+curl -s -X POST "$BASE_URL/stop_profile"
+echo " [stop_profile]"
+
+# Check final status
+echo ""
+echo "Profiler status:"
+curl -s "$BASE_URL/profile_status" | python3 -m json.tool || true
+
+run_ok=true
+
+# Server cleanup is handled by the EXIT trap
 
 # --- Validate output files ---
 echo ""

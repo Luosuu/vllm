@@ -1,9 +1,9 @@
 #!/bin/bash
 # Offline batch profiling for vLLM with Qwen3-32B using all 4 Proton configurations.
 #
-# Runs vLLM's offline inference with Proton profiling in 4 configurations:
-#   1. shadow+tree   2. shadow+trace   3. python+tree   4. python+trace
-# Each config outputs to a separate subdirectory under profiling_output/vllm/offline/.
+# Uses `vllm bench latency` which handles model loading, warmup, and profiling
+# internally. Each config outputs to a separate subdirectory under
+# profiling_output/vllm/offline/.
 #
 # Usage: bash scripts/profiling/vllm_offline.sh [OPTIONS]
 #   --model MODEL         Model name or path (default: Qwen/Qwen3-32B)
@@ -37,6 +37,9 @@ done
 
 # Output base directory
 OUTPUT_BASE="$REPO_ROOT/profiling_output/vllm/offline"
+
+# Hook for all configs
+HOOK="triton"
 
 # All 4 profiling configurations: context x data
 CONFIGS=(
@@ -82,15 +85,22 @@ for config in "${CONFIGS[@]}"; do
     echo "  Output: $CONFIG_DIR"
     echo "--------------------------------------------"
 
-    if python "$SCRIPT_DIR/helpers/vllm_offline_run.py" \
+    if vllm bench latency \
         --model "$MODEL" \
-        --output-dir "$CONFIG_DIR" \
-        --context "$CONTEXT" \
-        --data "$DATA" \
-        --hook "triton" \
-        --num-prompts "$BATCH_SIZE" \
-        --max-tokens "$OUTPUT_LEN" \
-        --max-model-len "$INPUT_LEN"; then
+        --input-len "$INPUT_LEN" \
+        --output-len "$OUTPUT_LEN" \
+        --batch-size "$BATCH_SIZE" \
+        --num-iters 1 \
+        --num-iters-warmup 1 \
+        --seed "$SEED" \
+        --profile \
+        --profiler-config "{
+            \"profiler\": \"proton\",
+            \"proton_profiler_dir\": \"$CONFIG_DIR\",
+            \"proton_context\": \"$CONTEXT\",
+            \"proton_data\": \"$DATA\",
+            \"proton_hook\": \"$HOOK\"
+        }"; then
         echo "  [OK] Inference completed for $CONTEXT+$DATA"
         passed=$((passed + 1))
     else
