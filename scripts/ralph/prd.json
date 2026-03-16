@@ -75,7 +75,7 @@
         "Script runs successfully and produces valid .hatchet files"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Reference existing scripts/profiling/vllm_online.sh for server lifecycle pattern"
     },
     {

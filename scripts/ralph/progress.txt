@@ -19,6 +19,8 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
 - Reference existing vLLM profiling scripts at scripts/profiling/ for patterns
 - Comparison scripts go under scripts/profiling/comparison/, output under profiling_output/comparison/
 - REPO_ROOT for comparison scripts is 3 levels up from SCRIPT_DIR (comparison/ -> profiling/ -> scripts/ -> repo)
+- vLLM online profiling: `vllm serve` with `--profiler-config` JSON, then `/start_profile` and `/stop_profile` POST to control window
+- vLLM bench serve uses `--random-input-len`/`--random-output-len` and `--request-rate` flags
 ---
 
 ## 2026-03-16 - US-001
@@ -45,5 +47,18 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
   - bench_one_batch profiles prefill and decode separately, producing one combined .hatchet file
   - Output file has double .hatchet extension (bench_one_batch creates path with .hatchet, proton adds another)
   - SGLang uses FlashInfer (CUDA C++) kernels, not Triton — but proton --hook triton still captures CUPTI callbacks
+---
+
+## 2026-03-16 - US-003
+- Implemented vLLM online serving profiling script at scripts/profiling/comparison/vllm_online.sh
+- Files changed: scripts/profiling/comparison/vllm_online.sh (new)
+- Script runs successfully, produces valid .hatchet file (proton_rank0.hatchet, ~323KB)
+- Profiles at 2 request rates (1 req/s and 4 req/s) using start_profile/stop_profile REST API
+- **Learnings for future iterations:**
+  - vLLM server with `--profiler-config` enables Proton; profiling window controlled via `/start_profile` and `/stop_profile` POST endpoints
+  - `vllm bench serve` uses `--random-input-len` and `--random-output-len` (not `--input-len`/`--output-len`)
+  - Server health check via `curl /health` with retry loop up to 300s works reliably
+  - Single .hatchet file accumulates across multiple start/stop cycles (both rates in one file)
+  - trap cleanup EXIT pattern ensures server process is killed even on script failure
 ---
 
