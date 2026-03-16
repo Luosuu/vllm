@@ -56,7 +56,7 @@
         "Script runs successfully and produces valid .hatchet files"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "SGLang bench_offline_throughput uses --random-input-len and --random-output-len flags"
     },
     {
