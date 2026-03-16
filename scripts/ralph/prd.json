@@ -112,7 +112,7 @@
         "Handles missing profile files gracefully (warns and skips)"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "proton-viewer -m time/ns <file> extracts kernel timing. May need to parse text output for categorization"
     },
     {

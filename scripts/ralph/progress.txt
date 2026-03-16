@@ -16,6 +16,8 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
 - SGLang's _ProfilerProton.stop() only deactivates; finalize() is deferred to atexit which never fires (SIGKILL shutdown)
 - Use `sglang.bench_one_batch` instead of `bench_offline_throughput` for Proton profiling (single-process, calls proton.finalize())
 - SGLang bench_one_batch: `python -m sglang.bench_one_batch --model-path <model> --batch-size N --input-len N --output-len N --profile --profile-activities PROTON --proton-context shadow --proton-data tree --proton-hook triton`
+- proton-viewer tree has scope markers (execute_context_*, <captured_at>) — filter these before kernel analysis
+- In vLLM online mode, model kernels only appear nested inside scopes — parse all tree depths
 - Reference existing vLLM profiling scripts at scripts/profiling/ for patterns
 - Comparison scripts go under scripts/profiling/comparison/, output under profiling_output/comparison/
 - REPO_ROOT for comparison scripts is 3 levels up from SCRIPT_DIR (comparison/ -> profiling/ -> scripts/ -> repo)
@@ -82,5 +84,19 @@ Feature: vLLM vs SGLang Proton Profiling Comparison
   - SGLANG_PROTON_CUDA_GRAPH=1 creates persistent session before graph capture (alternative approach, but data only flushes on finalize)
   - SGLang bench_serving uses --random-input/--random-output (no -len suffix), --backend sglang, --port for server connection
   - Output files have double .hatchet extension (profiler adds .hatchet to path that already ends in .hatchet)
+---
+
+## 2026-03-16 - US-005
+- Implemented profile analysis script at scripts/profiling/comparison/analyze.sh with Python helper analyze_kernels.py
+- Files changed: scripts/profiling/comparison/analyze.sh (new), scripts/profiling/comparison/analyze_kernels.py (new)
+- Script discovers .hatchet files, runs proton-viewer, categorizes kernels, prints side-by-side comparison table
+- Raw proton-viewer output saved to profiling_output/comparison/analysis/*.txt
+- **Learnings for future iterations:**
+  - proton-viewer tree output has scope markers (`execute_context_*`, `<captured_at>`) that are NOT actual kernels — must filter these out
+  - In vLLM offline mode, kernels appear both at tree root (aggregated total) and nested inside scopes (per-context)
+  - In vLLM online mode, model forward pass kernels (GEMM, normalization) ONLY appear nested inside `execute_context_*` scopes — parser must handle all tree depths
+  - To avoid double-counting: use top-level value for kernels at root, sum nested values for kernels only in scopes
+  - SGLang uses NVIDIA JIT GEMM kernels (`nvjet_tst_*`) and FlashInfer custom kernels, while vLLM uses Cutlass GEMM and Triton kernels
+  - Kernel categorization patterns: FlashAttn/SoftMax/reshape_and_cache → attention; gemm/gemv/silu → mlp_ffn; RMSNorm/fused_mean_mul_pow_rsqrt → normalization
 ---
 
