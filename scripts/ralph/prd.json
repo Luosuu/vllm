@@ -73,7 +73,7 @@
         "Script runs successfully and produces valid per-rate .hatchet files"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "SGLANG_PROTON_CUDA_GRAPH=1 creates persistent Proton session before graph capture. --no-cpu --no-gpu ensures ONLY Proton subscribes to CUPTI (no torch.profiler). SGLang bench_serving uses --random-input/--random-output (no -len suffix). Use --num-steps 30000 to avoid early cutoff. Reference scripts/profiling/comparison/sglang_online.sh for patterns."
     },
     {

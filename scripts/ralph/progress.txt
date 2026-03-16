@@ -37,3 +37,16 @@ Feature: Fair Online Profiling — vLLM vs SGLang (v2)
   - The v1 script at vllm_online.sh is a good reference for patterns; v2 adds per-rate restart, warmup, and configurable rates
 ---
 
+## 2026-03-16 - US-002
+- Implemented `scripts/profiling/comparison/sglang_online_v2.sh` — fair SGLang online profiling with per-rate sessions
+- Files changed: `scripts/profiling/comparison/sglang_online_v2.sh` (new)
+- Key design: same per-rate server restart pattern as vLLM v2, with SGLANG_PROTON_CUDA_GRAPH=1 for CUDA graph + Proton coexistence
+- **Learnings for future iterations:**
+  - SGLang uses `python -m sglang.profiler` as a blocking background client (returns after --num-steps forward steps), unlike vLLM's HTTP /start_profile + /stop_profile pattern
+  - Must `sleep 2` after starting profiler before sending benchmark requests to let profiler attach
+  - SGLang bench_serving uses `--random-input`/`--random-output` (no `-len`); forgetting this would silently produce wrong workload sizes
+  - SGLANG_PROTON_CUDA_GRAPH=1 must be set as env var on the server launch, not on the profiler client
+  - --num-steps 30000 is needed because steps count forward passes not requests (100 prompts × 256 output tokens ≈ 25,600 decode steps)
+  - The profiler PID must be waited on after benchmark completes; otherwise hatchet file may be incomplete
+---
+
