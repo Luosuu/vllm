@@ -1,114 +1,39 @@
 # Ralph Progress Log
 Started: 2026-03-16
-Feature: vLLM vs SGLang Proton Profiling Comparison
+Feature: Fair Online Profiling — vLLM vs SGLang (v2)
 ---
 
 ## Codebase Patterns
-- vLLM profiling uses `--profiler-config` JSON with keys: profiler, proton_context, proton_data, proton_hook
-- SGLang profiling uses `python -m sglang.profiler` with `--proton` flag and `--proton-context`, `--proton-data`, `--proton-hook` args
-- SGLang offline bench: `python -m sglang.bench_offline_throughput --model-path <model> --dataset-name random --random-input-len N --random-output-len N --num-prompts N`
-- SGLang online bench: `python -m sglang.bench_serving --backend sglang --dataset-name random --random-input N --random-output N --num-prompts N`
-- SGLang server: `python -m sglang.launch_server --model-path <model> --port 30000`
+- vLLM profiling uses `--profiler-config` JSON with keys: profiler, proton_profiler_dir, proton_context, proton_data, proton_hook
+- SGLang profiling uses `python -m sglang.profiler` with `--no-cpu --no-gpu --proton` flags and `--proton-context`, `--proton-data`, `--proton-hook` args
+- SGLang bench_serving uses `--random-input`/`--random-output` (no `-len` suffix); vLLM uses `--random-input-len`/`--random-output-len`
+- SGLang server with CUDA graphs + Proton: `SGLANG_PROTON_CUDA_GRAPH=1 python -m sglang.launch_server --model-path <model> --port 30000`
+- vLLM server with CUDA graphs + Proton: `vllm serve <model> --port 8000 --profiler-config '{...}'` (early-start pattern handles Proton+CUDA graph)
 - vLLM environment: ~/vllm/.venv, SGLang environment: ~/sglang/.venv
 - proton-viewer command: `proton-viewer -m time/ns <file.hatchet>`
-- Proton CLI wrapper: `proton --context shadow --data tree --hook triton --name <name> <script.py>`
-- SGLang Engine runs scheduler in a subprocess — proton in main process CANNOT see subprocess GPU kernels
-- SGLang's _ProfilerProton.stop() only deactivates; finalize() is deferred to atexit which never fires (SIGKILL shutdown)
-- Use `sglang.bench_one_batch` instead of `bench_offline_throughput` for Proton profiling (single-process, calls proton.finalize())
-- SGLang bench_one_batch: `python -m sglang.bench_one_batch --model-path <model> --batch-size N --input-len N --output-len N --profile --profile-activities PROTON --proton-context shadow --proton-data tree --proton-hook triton`
-- proton-viewer tree has scope markers (execute_context_*, <captured_at>) — filter these before kernel analysis
-- In vLLM online mode, model kernels only appear nested inside scopes — parse all tree depths
-- Reference existing vLLM profiling scripts at scripts/profiling/ for patterns
-- Comparison scripts go under scripts/profiling/comparison/, output under profiling_output/comparison/
 - REPO_ROOT for comparison scripts is 3 levels up from SCRIPT_DIR (comparison/ -> profiling/ -> scripts/ -> repo)
-- vLLM online profiling: `vllm serve` with `--profiler-config` JSON, then `/start_profile` and `/stop_profile` POST to control window
-- vLLM bench serve uses `--random-input-len`/`--random-output-len` and `--request-rate` flags
-- SGLang online profiling requires `--disable-cuda-graph` to avoid CUPTI error 39 (Proton vs CUDA graph subscription conflict)
-- SGLang profiler client: use `--no-cpu --no-gpu --proton` to avoid PyTorch CUDA profiler competing for CUPTI
-- SGLang's _ProfilerProton.stop() was patched to call finalize() for non-persistent sessions (data otherwise never written to disk)
-- SGLang graceful shutdown (kill_process_tree) uses SIGKILL — atexit/finally blocks in scheduler subprocess never fire
-- SGLang bench_serving uses `--random-input`/`--random-output` (no `-len` suffix, unlike vLLM)
+- SGLang's _ProfilerProton.stop() was patched to call finalize() for non-persistent sessions — verify persistent sessions are NOT finalized on /stop_profile
+- SGLang --num-steps controls forward steps (not requests); 100 prompts × 256 output tokens ≈ 25,600 decode steps
+- CUPTI error 39 root cause: CUDA only allows ONE CUPTI subscriber. Three things compete: (1) CUDA graph capture, (2) torch.profiler.ProfilerActivity.CUDA, (3) Proton's CUPTI backend
+- SGLang fix: SGLANG_PROTON_CUDA_GRAPH=1 creates persistent Proton session BEFORE graph capture → Proton owns CUPTI → graphs capture fine → session deactivate()/activate() for profiling window
+- vLLM fix: early-start pattern (start_and_deactivate() before capture_model()) → same approach
+- SGLang profiler client MUST use --no-cpu --no-gpu --proton to prevent torch.profiler from also subscribing to CUPTI
+- vLLM /start_profile + /stop_profile may accumulate into one .hatchet file — may need server restart per rate
+- Kernel categorization logic lives in scripts/profiling/comparison/analyze_kernels.py
+- v1 asymmetries fixed in v2: (1) CUDA graphs now ON for both (was ON/OFF), (2) per-rate sessions for both, (3) SGLang --num-steps=30000 (was 100), (4) higher rates: 4,16,32,inf (was 1,4)
+- Per-rate server restart pattern: stop_server → start_server(rate_dir) → wait_for_server → warmup → profile; ensures each rate gets its own .hatchet file
+- Warmup should run AFTER server restart but BEFORE /start_profile to warm caches without polluting profile data
 ---
 
 ## 2026-03-16 - US-001
-- Implemented vLLM offline batch profiling script at scripts/profiling/comparison/vllm_offline.sh
-- Files changed: scripts/profiling/comparison/vllm_offline.sh (new)
-- Script runs successfully, produces valid .hatchet file (proton_rank0.hatchet, ~91KB)
+- Implemented `scripts/profiling/comparison/vllm_online_v2.sh` — fair vLLM online profiling with per-rate sessions
+- Files changed: `scripts/profiling/comparison/vllm_online_v2.sh` (new)
+- Key design: server restarted per rate to guarantee separate .hatchet files (v1 accumulated into one file)
 - **Learnings for future iterations:**
-  - vLLM bench latency with `--profile` and `--profiler-config` handles Proton setup internally
-  - Only 1 warmup iter + 1 profiling iter needed for comparison profiling
-  - proton-viewer validation: `proton-viewer -m time/ns <file>` returns 0 on success
-  - Output file is named proton_rank0.hatchet by default
-  - REPO_ROOT must account for the extra `comparison/` subdirectory level
----
-
-## 2026-03-16 - US-002
-- Implemented SGLang offline batch profiling script at scripts/profiling/comparison/sglang_offline.sh
-- Files changed: scripts/profiling/comparison/sglang_offline.sh (new)
-- Script runs successfully, produces valid .hatchet file (profile-proton_rank0.hatchet.hatchet, ~16KB)
-- **Learnings for future iterations:**
-  - SGLang Engine scheduler runs in a subprocess; proton CLI wrapper and proton Python API in main process cannot capture GPU kernels
-  - SGLang's _ProfilerProton.stop() only calls deactivate(), not finalize() — atexit handler never fires due to SIGKILL shutdown
-  - Solution: use `sglang.bench_one_batch` which runs in a single process and properly calls proton.finalize()
-  - bench_one_batch uses --batch-size/--input-len/--output-len (not --dataset-name random/--num-prompts)
-  - bench_one_batch profiles prefill and decode separately, producing one combined .hatchet file
-  - Output file has double .hatchet extension (bench_one_batch creates path with .hatchet, proton adds another)
-  - SGLang uses FlashInfer (CUDA C++) kernels, not Triton — but proton --hook triton still captures CUPTI callbacks
----
-
-## 2026-03-16 - US-003
-- Implemented vLLM online serving profiling script at scripts/profiling/comparison/vllm_online.sh
-- Files changed: scripts/profiling/comparison/vllm_online.sh (new)
-- Script runs successfully, produces valid .hatchet file (proton_rank0.hatchet, ~323KB)
-- Profiles at 2 request rates (1 req/s and 4 req/s) using start_profile/stop_profile REST API
-- **Learnings for future iterations:**
-  - vLLM server with `--profiler-config` enables Proton; profiling window controlled via `/start_profile` and `/stop_profile` POST endpoints
-  - `vllm bench serve` uses `--random-input-len` and `--random-output-len` (not `--input-len`/`--output-len`)
-  - Server health check via `curl /health` with retry loop up to 300s works reliably
-  - Single .hatchet file accumulates across multiple start/stop cycles (both rates in one file)
-  - trap cleanup EXIT pattern ensures server process is killed even on script failure
----
-
-## 2026-03-16 - US-004
-- Implemented SGLang online serving profiling script at scripts/profiling/comparison/sglang_online.sh
-- Files changed: scripts/profiling/comparison/sglang_online.sh (new), ~/sglang SGLang _ProfilerProton.stop() patch
-- Script runs successfully, produces 2 valid .hatchet files (rate_1 ~22KB, rate_4 ~20KB)
-- Profiles at 2 request rates (1 req/s and 4 req/s) using sglang.profiler + bench_serving
-- **Learnings for future iterations:**
-  - CUPTI error 39 (multiple subscribers) occurs when Proton tries to subscribe after CUDA graph capture
-  - Solution: --disable-cuda-graph on server launch to prevent CUDA graphs from holding CUPTI
-  - Must use --no-cpu --no-gpu with sglang.profiler to avoid PyTorch's CUDA profiler also competing for CUPTI
-  - SGLang's _ProfilerProton.stop() only called deactivate(), never finalize() — data stayed in memory, never written to disk
-  - Patched stop() to accept persistent=True/False parameter; non-persistent sessions now call finalize() which flushes .hatchet
-  - SGLang graceful shutdown uses kill_process_tree() with SIGKILL — atexit/finally blocks never fire in scheduler subprocess
-  - SGLANG_PROTON_CUDA_GRAPH=1 creates persistent session before graph capture (alternative approach, but data only flushes on finalize)
-  - SGLang bench_serving uses --random-input/--random-output (no -len suffix), --backend sglang, --port for server connection
-  - Output files have double .hatchet extension (profiler adds .hatchet to path that already ends in .hatchet)
----
-
-## 2026-03-16 - US-005
-- Implemented profile analysis script at scripts/profiling/comparison/analyze.sh with Python helper analyze_kernels.py
-- Files changed: scripts/profiling/comparison/analyze.sh (new), scripts/profiling/comparison/analyze_kernels.py (new)
-- Script discovers .hatchet files, runs proton-viewer, categorizes kernels, prints side-by-side comparison table
-- Raw proton-viewer output saved to profiling_output/comparison/analysis/*.txt
-- **Learnings for future iterations:**
-  - proton-viewer tree output has scope markers (`execute_context_*`, `<captured_at>`) that are NOT actual kernels — must filter these out
-  - In vLLM offline mode, kernels appear both at tree root (aggregated total) and nested inside scopes (per-context)
-  - In vLLM online mode, model forward pass kernels (GEMM, normalization) ONLY appear nested inside `execute_context_*` scopes — parser must handle all tree depths
-  - To avoid double-counting: use top-level value for kernels at root, sum nested values for kernels only in scopes
-  - SGLang uses NVIDIA JIT GEMM kernels (`nvjet_tst_*`) and FlashInfer custom kernels, while vLLM uses Cutlass GEMM and Triton kernels
-  - Kernel categorization patterns: FlashAttn/SoftMax/reshape_and_cache → attention; gemm/gemv/silu → mlp_ffn; RMSNorm/fused_mean_mul_pow_rsqrt → normalization
----
-
-## 2026-03-16 - US-006
-- Implemented report generation script at scripts/profiling/comparison/generate_report.py
-- Generates self-contained Markdown report at profiling_output/comparison/report.md
-- Files changed: scripts/profiling/comparison/generate_report.py (new)
-- Report includes all 8 required sections: executive summary, methodology, offline comparison, online comparison, category breakdown, memory/occupancy, observations/recommendations, raw data appendix
-- Uses markdown tables for all comparisons, reuses analyze_kernels.py parsing logic
-- **Learnings for future iterations:**
-  - Reusing analyze_kernels.py via sys.path.insert and direct import avoids code duplication
-  - profiling_output/ is in .gitignore — generated report.md must be regenerated by running the script
-  - Report data is derived from analysis/*.txt files produced by analyze.sh, so analyze.sh must run before generate_report.py
+  - Per-rate server restart is necessary because vLLM /start_profile + /stop_profile may accumulate into a single .hatchet — restarting the server per rate guarantees isolation
+  - Warmup must happen after server start but before /start_profile — this warms CUDA caches and JIT without polluting the profile
+  - `sleep 2` after server kill helps release the port before restarting
+  - CUDA graphs are the default for vLLM — no flag needed (just avoid --enforce-eager)
+  - The v1 script at vllm_online.sh is a good reference for patterns; v2 adds per-rate restart, warmup, and configurable rates
 ---
 
