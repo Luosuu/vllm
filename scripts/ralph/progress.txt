@@ -1,0 +1,31 @@
+# Ralph Progress Log
+Started: 2026-03-16
+Feature: vLLM vs SGLang Proton Profiling Comparison
+---
+
+## Codebase Patterns
+- vLLM profiling uses `--profiler-config` JSON with keys: profiler, proton_context, proton_data, proton_hook
+- SGLang profiling uses `python -m sglang.profiler` with `--proton` flag and `--proton-context`, `--proton-data`, `--proton-hook` args
+- SGLang offline bench: `python -m sglang.bench_offline_throughput --model-path <model> --dataset-name random --random-input-len N --random-output-len N --num-prompts N`
+- SGLang online bench: `python -m sglang.bench_serving --backend sglang --dataset-name random --random-input N --random-output N --num-prompts N`
+- SGLang server: `python -m sglang.launch_server --model-path <model> --port 30000`
+- vLLM environment: ~/vllm/.venv, SGLang environment: ~/sglang/.venv
+- proton-viewer command: `proton-viewer -m time/ns <file.hatchet>`
+- Proton CLI wrapper: `proton --context shadow --data tree --hook triton -o <output_dir> python script.py`
+- Reference existing vLLM profiling scripts at scripts/profiling/ for patterns
+- Comparison scripts go under scripts/profiling/comparison/, output under profiling_output/comparison/
+- REPO_ROOT for comparison scripts is 3 levels up from SCRIPT_DIR (comparison/ -> profiling/ -> scripts/ -> repo)
+---
+
+## 2026-03-16 - US-001
+- Implemented vLLM offline batch profiling script at scripts/profiling/comparison/vllm_offline.sh
+- Files changed: scripts/profiling/comparison/vllm_offline.sh (new)
+- Script runs successfully, produces valid .hatchet file (proton_rank0.hatchet, ~91KB)
+- **Learnings for future iterations:**
+  - vLLM bench latency with `--profile` and `--profiler-config` handles Proton setup internally
+  - Only 1 warmup iter + 1 profiling iter needed for comparison profiling
+  - proton-viewer validation: `proton-viewer -m time/ns <file>` returns 0 on success
+  - Output file is named proton_rank0.hatchet by default
+  - REPO_ROOT must account for the extra `comparison/` subdirectory level
+---
+

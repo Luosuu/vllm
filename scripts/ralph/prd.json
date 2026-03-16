@@ -1,0 +1,141 @@
+{
+  "project": "vllm-sglang-proton-comparison",
+  "branchName": "ralph/proton-profiler",
+  "description": "Profile Qwen3-1.7B on both vLLM and SGLang with Proton profiler, analyze kernel-level performance differences with proton-viewer, and produce a detailed comparison report",
+  "instructions": [
+    "vLLM environment: ~/vllm/.venv (activate with `. ~/vllm/.venv/bin/activate`)",
+    "SGLang environment: ~/sglang/.venv (activate with `. ~/sglang/.venv/bin/activate`)",
+    "Model: Qwen/Qwen3-1.7B (bf16) on 1x H100 80GB",
+    "Use shadow context + tree data as primary Proton config (lowest overhead)",
+    "vLLM profiling uses --profiler-config JSON with proton backend",
+    "SGLang profiling uses python -m sglang.profiler with --proton flag or proton CLI wrapper",
+    "SGLang default port is 30000, vLLM default port is 8000",
+    "All scripts go under scripts/profiling/comparison/",
+    "All output goes under profiling_output/comparison/",
+    "Workload params must be identical across frameworks for fair comparison",
+    "Make clear and simple code design for ease of understanding",
+    "Write docstring and inline comments for every method",
+    "Only write absolutely necessary code, avoid redundant code, keep codebase clean",
+    "Avoid fallbacks and try-catch — fail early to discover issues at the shallow surface",
+    "Do not include claude as co-author in commit message",
+    "Do not include US-00X in commit message, follow vLLM commit message style"
+  ],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "vLLM offline batch profiling script",
+      "description": "As a researcher, I want a script that profiles vLLM offline batch inference with Qwen3-1.7B using Proton so I have a baseline for comparison.",
+      "acceptanceCriteria": [
+        "Script at scripts/profiling/comparison/vllm_offline.sh",
+        "Activates ~/vllm/.venv before running",
+        "Uses vllm bench latency with --profiler-config JSON containing proton_context=shadow, proton_data=tree, proton_hook=triton",
+        "Default workload: batch_size=8, input_len=1024, output_len=256, seed=42",
+        "All params configurable via CLI args (--model, --batch-size, --input-len, --output-len, --seed)",
+        "Output goes to profiling_output/comparison/vllm/offline/",
+        "Validates .hatchet output files with proton-viewer",
+        "Prints summary of output files on completion",
+        "Script runs successfully and produces valid .hatchet files"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Reference existing scripts/profiling/vllm_offline.sh for patterns"
+    },
+    {
+      "id": "US-002",
+      "title": "SGLang offline batch profiling script",
+      "description": "As a researcher, I want a script that profiles SGLang offline batch inference with Qwen3-1.7B using the same workload as vLLM.",
+      "acceptanceCriteria": [
+        "Script at scripts/profiling/comparison/sglang_offline.sh",
+        "Activates ~/sglang/.venv before running",
+        "Uses proton CLI wrapper to profile python -m sglang.bench_offline_throughput",
+        "Proton config: --context shadow --data tree --hook triton",
+        "Workload matches vLLM: --model-path Qwen/Qwen3-1.7B --dataset-name random --random-input-len 1024 --random-output-len 256 --num-prompts 8",
+        "All params configurable via CLI args",
+        "Output goes to profiling_output/comparison/sglang/offline/",
+        "Validates .hatchet output files with proton-viewer",
+        "Script runs successfully and produces valid .hatchet files"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "SGLang bench_offline_throughput uses --random-input-len and --random-output-len flags"
+    },
+    {
+      "id": "US-003",
+      "title": "vLLM online serving profiling script",
+      "description": "As a researcher, I want to profile vLLM under online serving conditions with varying request arrival rates.",
+      "acceptanceCriteria": [
+        "Script at scripts/profiling/comparison/vllm_online.sh",
+        "Activates ~/vllm/.venv before running",
+        "Starts vLLM server with vllm serve and --profiler-config JSON enabling Proton",
+        "Uses REST API (/start_profile, /stop_profile) to control profiling window",
+        "Runs vllm bench serve with --dataset-name random --random-input-len 1024 --random-output-len 256 --num-prompts 50 --seed 42",
+        "Tests at 2 request rates: 1 req/s and 4 req/s (--request-rate flag)",
+        "Output goes to profiling_output/comparison/vllm/online/",
+        "Cleans up server process on exit using trap",
+        "Script runs successfully and produces valid .hatchet files"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Reference existing scripts/profiling/vllm_online.sh for server lifecycle pattern"
+    },
+    {
+      "id": "US-004",
+      "title": "SGLang online serving profiling script",
+      "description": "As a researcher, I want to profile SGLang under online serving conditions with the same workload as vLLM.",
+      "acceptanceCriteria": [
+        "Script at scripts/profiling/comparison/sglang_online.sh",
+        "Activates ~/sglang/.venv before running",
+        "Starts SGLang server with python -m sglang.launch_server --model-path Qwen/Qwen3-1.7B --port 30000",
+        "Uses python -m sglang.profiler with --proton --proton-context shadow --proton-data tree --proton-hook triton to control profiling",
+        "Runs python -m sglang.bench_serving with --dataset-name random --random-input 1024 --random-output 256 --num-prompts 50 --seed 42",
+        "Tests at 2 request rates: 1 req/s and 4 req/s (--request-rate flag)",
+        "Output goes to profiling_output/comparison/sglang/online/",
+        "Cleans up server process on exit using trap",
+        "Script runs successfully and produces valid .hatchet files"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "SGLang default port is 30000. profiler.py sends /start_profile POST with proton params"
+    },
+    {
+      "id": "US-005",
+      "title": "Profile analysis script with proton-viewer",
+      "description": "As a researcher, I want to extract and compare kernel-level metrics from all profiles to identify performance differences between vLLM and SGLang.",
+      "acceptanceCriteria": [
+        "Script at scripts/profiling/comparison/analyze.sh",
+        "Runs proton-viewer on all .hatchet files from both frameworks",
+        "Extracts top-20 kernels by GPU time for each framework and mode (offline/online)",
+        "Categorizes kernels by type: attention, MLP/FFN, normalization, embedding, other",
+        "Computes aggregate GPU time per kernel category for side-by-side comparison",
+        "Saves raw proton-viewer output to profiling_output/comparison/analysis/ as text files",
+        "Prints summary table to stdout showing vLLM vs SGLang kernel time breakdown",
+        "Handles missing profile files gracefully (warns and skips)"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "proton-viewer -m time/ns <file> extracts kernel timing. May need to parse text output for categorization"
+    },
+    {
+      "id": "US-006",
+      "title": "Detailed comparison report",
+      "description": "As a researcher, I want a detailed analysis report with per-kernel comparisons and actionable recommendations.",
+      "acceptanceCriteria": [
+        "Report generation script at scripts/profiling/comparison/generate_report.sh (or .py)",
+        "Report output at profiling_output/comparison/report.md",
+        "Section 1 — Executive Summary: key findings in 3-5 bullet points",
+        "Section 2 — Methodology: model, hardware, workload parameters, profiling config",
+        "Section 3 — Offline Batch Comparison: per-kernel GPU time table, total GPU time, kernel count",
+        "Section 4 — Online Serving Comparison: per-kernel GPU time at each request rate, scheduling overhead",
+        "Section 5 — Kernel Category Breakdown: aggregated time by category with percentage, as comparison table",
+        "Section 6 — Memory & Occupancy: any available memory/occupancy metrics from Proton",
+        "Section 7 — Observations & Recommendations: what each framework does better, actionable items",
+        "Section 8 — Raw Data Appendix: pointers to all profile files and analysis outputs",
+        "Report uses markdown tables for all comparisons",
+        "Report is self-contained and readable without running scripts"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "This story depends on US-005 analysis output. Parse proton-viewer text files to build report tables"
+    }
+  ]
+}
