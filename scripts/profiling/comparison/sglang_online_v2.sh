@@ -96,9 +96,15 @@ trap cleanup EXIT
 
 # start_server: launches SGLang server with CUDA graphs and persistent Proton session.
 # SGLANG_PROTON_CUDA_GRAPH=1 ensures Proton owns CUPTI before graph capture.
+# $1 = output directory for Proton .hatchet files (sets SGLANG_TORCH_PROFILER_DIR
+#       so the persistent session writes to the correct per-rate directory).
 start_server() {
+    local proton_output_dir="$1"
     echo "Starting SGLang server on port $PORT (CUDA graphs + Proton)..."
-    SGLANG_PROTON_CUDA_GRAPH=1 python -m sglang.launch_server \
+    echo "  Proton output dir: $proton_output_dir"
+    SGLANG_PROTON_CUDA_GRAPH=1 \
+    SGLANG_TORCH_PROFILER_DIR="$proton_output_dir" \
+    python -m sglang.launch_server \
         --model-path "$MODEL" \
         --port "$PORT" &
     SERVER_PID=$!
@@ -146,9 +152,9 @@ for RATE in "${REQUEST_RATES[@]}"; do
     RATE_DIR="$OUTPUT_BASE/rate_${RATE}"
     mkdir -p "$RATE_DIR"
 
-    # Start fresh server for this rate
+    # Start fresh server for this rate (with per-rate output directory)
     stop_server
-    start_server
+    start_server "$RATE_DIR"
     wait_for_server
 
     # Warmup: send prompts at inf rate (not profiled)
@@ -193,9 +199,16 @@ for RATE in "${REQUEST_RATES[@]}"; do
         --seed "$SEED" \
         --request-rate "$RATE"
 
-    # Wait for profiler to finish collecting data
-    echo "Waiting for profiler to complete..."
-    wait "$PROFILER_PID"
+    # Explicitly stop profiling to flush .hatchet data to disk.
+    # SGLang's graceful shutdown uses SIGKILL which bypasses atexit/finally,
+    # so we must trigger finalize() via /stop_profile before killing the server.
+    echo "Stopping profiler (flushing .hatchet to disk)..."
+    curl -s -X POST "$BASE_URL/stop_profile"
+    echo " [stop_profile sent]"
+
+    # Wait for profiler client to finish
+    echo "Waiting for profiler client to complete..."
+    wait "$PROFILER_PID" 2>/dev/null || true
 
     echo "Completed rate=$RATE req/s"
 done

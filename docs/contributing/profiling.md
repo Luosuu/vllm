@@ -94,7 +94,7 @@ Proton is integrated into vLLM as a profiler backend alongside `torch` and `cuda
 
 The wrapper supports two lifecycle modes:
 
-- **Non-periodic (default):** Each `/start_profile` → `/stop_profile` cycle creates a new Proton session via `proton.start()` and finalizes it via `proton.finalize()`. Simple and self-contained.
+- **Non-periodic (default):** If the Proton session was early-started (for CUDA graph capture), `/start_profile` reactivates it via `proton.activate()` and `/stop_profile` pauses it via `proton.deactivate(flushing=True)`. The session persists and is reused across cycles; `proton.finalize()` is only called on server shutdown. If no early-started session exists, each cycle creates a fresh session via `proton.start()` and finalizes it via `proton.finalize()`.
 - **Periodic flushing:** Enabled by setting `proton_mode` to `"periodic_flushing"`. A single session is created on the first start and persists across cycles. Subsequent starts call `proton.activate()`, stops call `proton.deactivate(flushing=True)`, and `proton.finalize()` is only called on server shutdown. Per-phase output files (`.part_N`) are written automatically, enabling memory-bounded long-running profiling.
 
 ### Configuration Options

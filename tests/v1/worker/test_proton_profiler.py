@@ -1126,9 +1126,10 @@ class TestProtonEarlyStart:
         mock_proton.activate.assert_called_once_with(session=42)
         mock_proton.start.assert_not_called()
 
-    def test_stop_after_activated_start_deactivates_then_finalizes(self):
+    def test_stop_after_activated_start_deactivates_without_finalize(self):
         """Test that _stop() after an activate()-based start calls
-        deactivate(flushing=True) then finalize() in non-periodic mode."""
+        deactivate(flushing=True) but does NOT finalize in non-periodic mode.
+        The session stays alive for reuse; finalize only on shutdown()."""
         config = ProfilerConfig(
             profiler="proton",
             proton_profiler_dir="/tmp/proton_out",
@@ -1142,16 +1143,16 @@ class TestProtonEarlyStart:
         wrapper._start()
         wrapper._stop()
 
-        # Should deactivate with flushing, then finalize
+        # Should deactivate with flushing, but NOT finalize
         mock_proton.deactivate.assert_called_once_with(
             session=42, flushing=True
         )
-        mock_proton.finalize.assert_called_once_with(session=42)
-        assert wrapper._session_id is None
+        mock_proton.finalize.assert_not_called()
+        assert wrapper._session_id == 42  # Session stays alive
 
     def test_full_lifecycle_non_periodic(self):
         """Test the full early-start lifecycle in non-periodic mode:
-        start_and_deactivate → deactivate_early → start → stop."""
+        start_and_deactivate → deactivate_early → start → stop → shutdown."""
         config = ProfilerConfig(
             profiler="proton",
             proton_profiler_dir="/tmp/proton_out",
@@ -1175,14 +1176,21 @@ class TestProtonEarlyStart:
 
         wrapper.stop()
         assert wrapper._running is False
-        assert wrapper._session_id is None
+        # Session stays alive — only deactivated, not finalized
+        assert wrapper._session_id == 42
 
         # Verify call sequence
         assert mock_proton.start.call_count == 1  # Only from early init
         mock_proton.activate.assert_called_once_with(session=42)
         # deactivate called twice: once early (no flushing), once at stop (flushing)
         assert mock_proton.deactivate.call_count == 2
+        # finalize NOT called yet — only on shutdown
+        mock_proton.finalize.assert_not_called()
+
+        # Phase 4: Shutdown finalizes the session
+        wrapper.shutdown()
         mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
 
     def test_full_lifecycle_periodic(self):
         """Test the full early-start lifecycle in periodic mode:
@@ -1505,8 +1513,9 @@ class TestProfileReusesEarlyInitSession:
         assert mock_proton.start.call_count == 1  # Only from early init
 
     def test_full_lifecycle_non_periodic_through_public_api(self):
-        """Test early init → start() → stop() in non-periodic mode
-        using the public WorkerProfiler API (what profile() calls)."""
+        """Test early init → start() → stop() → shutdown() in non-periodic
+        mode using the public WorkerProfiler API (what profile() calls).
+        Stop only deactivates; shutdown finalizes."""
         config = ProfilerConfig(
             profiler="proton",
             proton_profiler_dir="/tmp/proton_out",
@@ -1528,14 +1537,20 @@ class TestProfileReusesEarlyInitSession:
         wrapper.stop()
         assert not wrapper._running
         assert not wrapper._active
-        assert wrapper._session_id is None  # Finalized in non-periodic
+        # Session stays alive — only deactivated, not finalized
+        assert wrapper._session_id == 42
 
-        # Verify Proton call sequence
+        # Verify Proton call sequence after stop
         assert mock_proton.start.call_count == 1  # Only early init
         mock_proton.activate.assert_called_once_with(session=42)
         mock_proton.deactivate.assert_any_call(session=42)  # Early deactivate
         mock_proton.deactivate.assert_any_call(session=42, flushing=True)
+        mock_proton.finalize.assert_not_called()  # Not yet
+
+        # Phase 4: Shutdown finalizes
+        wrapper.shutdown()
         mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
 
     def test_full_lifecycle_periodic_through_public_api(self):
         """Test early init → start() → stop() → start() → stop()
@@ -1622,7 +1637,8 @@ class TestProfileReusesEarlyInitSession:
 
     def test_multiple_start_stop_cycles_after_early_init(self):
         """Test that multiple start/stop cycles work after early init
-        in non-periodic mode (each cycle creates a new session after first)."""
+        in non-periodic mode. The early-started session persists across
+        cycles — activate/deactivate is used, not start/finalize."""
         config = ProfilerConfig(
             profiler="proton",
             proton_profiler_dir="/tmp/proton_out",
@@ -1633,17 +1649,25 @@ class TestProfileReusesEarlyInitSession:
         # First cycle reuses early-started session
         wrapper.start()
         wrapper.stop()
-        assert wrapper._session_id is None  # Finalized
+        assert wrapper._session_id == 42  # Session stays alive
 
-        # Second cycle creates a new session (no early init left)
+        # Second cycle also reuses the same session
         wrapper.start()
         wrapper.stop()
-        assert wrapper._session_id is None
+        assert wrapper._session_id == 42
 
-        # start called: 1 (early) + 1 (second cycle) = 2
-        assert mock_proton.start.call_count == 2
-        mock_proton.activate.assert_called_once()  # Only first cycle
-        assert mock_proton.finalize.call_count == 2
+        # start called only once (early init); all cycles use activate
+        assert mock_proton.start.call_count == 1
+        assert mock_proton.activate.call_count == 2
+        # deactivate called: 1 (early) + 2 (stop cycles) = 3
+        assert mock_proton.deactivate.call_count == 3
+        # finalize not called — only on shutdown
+        mock_proton.finalize.assert_not_called()
+
+        # Shutdown finalizes the session
+        wrapper.shutdown()
+        mock_proton.finalize.assert_called_once_with(session=42)
+        assert wrapper._session_id is None
 
     def test_shutdown_after_early_init_periodic(self):
         """Test shutdown after early init + profiling in periodic mode."""

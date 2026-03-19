@@ -143,11 +143,13 @@ def parse_proton_viewer_output(text):
             # Nested: per-context entry
             nested_kernels[name] += time_ns
 
-    # Merge: prefer top-level (aggregate); fall back to nested sum
+    # Merge: sum top-level and nested times.
+    # Top-level entries are kernels that ran outside CUDA graph replay.
+    # Nested entries (under <captured_at>) are kernels from CUDA graph replay.
+    # Both represent real GPU time and must be summed.
     merged = dict(top_level_kernels)
     for name, time_ns in nested_kernels.items():
-        if name not in merged:
-            merged[name] = time_ns
+        merged[name] = merged.get(name, 0) + time_ns
 
     # Convert to sorted list
     kernels = [(time_ns, name) for name, time_ns in merged.items()]
