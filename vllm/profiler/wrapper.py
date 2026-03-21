@@ -313,19 +313,16 @@ class ProtonProfilerWrapper(WorkerProfiler):
     in .hatchet format. The triton.profiler module is lazily imported
     to avoid errors when Triton is not installed.
 
-    Supports two modes:
-      - **Non-periodic (default):** If a session was early-started (for
-        CUDA graph capture), it persists across start/stop cycles.
-        _start() calls proton.activate(), _stop() calls
-        proton.deactivate(flushing=True), and proton.finalize() is only
-        called on shutdown(). Without an early-started session, each
-        cycle creates a fresh session via proton.start() and finalizes
-        it via proton.finalize().
-      - **Periodic flushing:** Enabled when proton_mode starts with
-        "periodic_flushing". A single session is created on the first
-        _start() call and reused across subsequent cycles. _start() calls
-        proton.activate(), _stop() calls proton.deactivate(flushing=True),
-        and proton.finalize() is only called on shutdown().
+    A single session is created on the first _start() call (or via
+    start_and_deactivate() for early CUDA graph capture) and reused
+    across all start/stop cycles. _start() reactivates the session
+    via proton.activate(), _stop() pauses it via
+    proton.deactivate(flushing=True), and proton.finalize() is only
+    called on shutdown().
+
+    In periodic flushing mode (proton_mode="periodic_flushing"),
+    _stop() additionally calls proton.data.advance_phase() to write
+    per-phase .part_N output files.
     """
 
     def __init__(
@@ -392,11 +389,6 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._current_phase: int = 0
         self._output_files: list[str] = []
 
-        # Tracks whether the current cycle was started via activate()
-        # (from an early-started session) rather than proton.start().
-        # Used in non-periodic _stop() to call deactivate before finalize.
-        self._was_activated: bool = False
-
         if local_rank in (None, 0):
             mode_label = "periodic" if self._periodic_mode else "non-periodic"
             logger.info_once(
@@ -455,54 +447,29 @@ class ProtonProfilerWrapper(WorkerProfiler):
         """Start or reactivate a Proton profiling session.
 
         If a session already exists (from start_and_deactivate() or a
-        previous periodic cycle), reactivates it via proton.activate().
+        previous cycle), reactivates it via proton.activate().
         Otherwise creates a new session via proton.start().
         """
         if self._session_id is not None:
-            # Reactivate existing session (early-started or periodic reuse)
+            # Reactivate existing session (early-started or reuse)
             self._proton.activate(session=self._session_id)
-            self._was_activated = True
         else:
             # Create a new session
             self._session_id = self._create_session()
-            self._was_activated = False
 
     @override
     def _stop(self) -> None:
-        """Stop or deactivate the Proton profiling session.
+        """Deactivate the Proton profiling session with flushing.
 
-        Non-periodic mode: If the session was early-started (activated
-        from a pre-existing session), only deactivates with flushing to
-        keep the session alive for reuse. Fresh sessions (no early start)
-        are finalized and destroyed.
-        Periodic mode: Deactivates the session with flushing=True to
-        write per-phase .part_N output files. The session is preserved
-        for reuse; finalize() is only called on shutdown().
+        The session is always kept alive — finalize() is only called on
+        shutdown(). In periodic mode, advance_phase() is called after
+        deactivation to write per-phase .part_N output files.
         """
+        self._proton.deactivate(session=self._session_id, flushing=True)
         if self._periodic_mode:
-            # Deactivate with flushing to write per-phase output
-            self._proton.deactivate(
-                session=self._session_id, flushing=True
-            )
-            # Advance phase counter and collect output file path
             self._proton.data.advance_phase(session=self._session_id)
-            self._scan_output_files()
             self._current_phase += 1
-            # Session is preserved — not cleared
-        else:
-            if self._was_activated:
-                # Early-started session: just deactivate, keep session
-                # alive for reuse. Finalize happens only on shutdown().
-                self._proton.deactivate(
-                    session=self._session_id, flushing=True
-                )
-                self._scan_output_files()
-            else:
-                # Fresh session: finalize and destroy
-                self._proton.finalize(session=self._session_id)
-                self._scan_output_files()
-                self._session_id = None
-            self._was_activated = False
+        self._scan_output_files()
 
     def _scan_output_files(self) -> None:
         """Scan proton_profiler_dir for output files matching this rank.
@@ -540,22 +507,13 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     def shutdown(self) -> None:
-        """Shut down the profiler, finalizing any persistent session.
+        """Shut down the profiler, finalizing the session.
 
-        Stops profiling if still running, then finalizes any session
-        that is still alive (periodic sessions, or early-started
-        non-periodic sessions that were only deactivated in _stop()).
+        Stops profiling if still running, then finalizes the session.
         """
         logger.info_once("Shutting down profiler", scope="local")
         if self._running:
-            if self._periodic_mode:
-                self._active = False
-                self._active_iteration_count = 0
-                self._profiling_for_iters = 0
-                self._call_stop()
-            else:
-                self.stop()
-        # Finalize any persistent session (periodic or early-started)
+            self.stop()
         if self._session_id is not None:
             self._proton.finalize(session=self._session_id)
             self._scan_output_files()
