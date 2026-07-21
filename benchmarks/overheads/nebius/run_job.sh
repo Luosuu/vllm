@@ -51,7 +51,7 @@ mkdir -p "$PERSIST_DIR" "$WORK_DIR"
 sync_results() {
   local mode=${1:-checkpoint}
   [[ $STORAGE_MODE == object ]] || return 0
-  local options=(-r --delete --exclude='*.tmp')
+  local options=(-r --inplace --delete --exclude='*.tmp')
   if [[ $mode != final ]]; then
     options+=(--exclude='profiles/')
   fi
@@ -62,7 +62,7 @@ sync_results() {
       case_dir=$(dirname "$case_file")
       relative=${case_dir#"$WORK_DIR"/}
       mkdir -p "$PERSIST_DIR/$relative"
-      rsync -r --delete "$case_dir/" "$PERSIST_DIR/$relative/"
+      rsync -r --inplace --delete "$case_dir/" "$PERSIST_DIR/$relative/"
     done < <(find "$WORK_DIR" -name case.json -type f -print0)
   fi
 }

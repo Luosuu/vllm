@@ -384,6 +384,17 @@ def terminate_process_group(
         process.wait(timeout=timeout)
 
 
+def print_log_tail(path: Path, lines: int = 80) -> None:
+    try:
+        content = path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        print(f"  could not read {path}: {exc}", file=sys.stderr)
+        return
+    print(f"  --- tail of {path} ---", file=sys.stderr)
+    for line in content[-lines:]:
+        print(f"  {line}", file=sys.stderr)
+
+
 def collect_results(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows = []
     failures = []
@@ -680,6 +691,11 @@ def main(args: argparse.Namespace) -> int:
             f"  {'PASS' if succeeded else 'FAIL'}; "
             f"raw profiles={profile_bytes / 1024**2:.1f} MiB"
         )
+        if not succeeded:
+            print(f"  error: {error}", file=sys.stderr)
+            print_log_tail(output_dir / "run.log")
+            for server_log in sorted(output_dir.rglob("server.log")):
+                print_log_tail(server_log)
     if not args.dry_run:
         rows, failures = collect_results(root)
         write_csv(root / "results.csv", rows)
