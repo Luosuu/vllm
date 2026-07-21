@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 usage() {
   cat <<'EOF'
 Submit the vLLM profiler-overhead matrix as a Nebius Serverless AI Job.
@@ -12,7 +14,7 @@ Usage:
   submit_job.sh [submission options] -- [run_profiler_matrix.py options]
 
 Required:
-  --image IMAGE                 Immutable benchmark container image.
+  --image IMAGE                 Official/prewarmed vLLM image (prefer a digest).
   --volume-source SOURCE        Filesystem/bucket ID, name, or s3://bucket.
 
 Submission options:
@@ -137,6 +139,10 @@ nebius_cmd=(nebius)
 [[ -z $profile ]] || nebius_cmd+=(--profile "$profile")
 
 create_help=$("${nebius_cmd[@]}" ai job create --help 2>&1)
+if [[ $create_help != *--inject-file* || $create_help != *--args* ]]; then
+  echo "this nebius CLI lacks --inject-file/--args; update it first" >&2
+  exit 1
+fi
 if [[ -n $hf_secret && $create_help != *--env-secret* ]]; then
   echo "this nebius CLI lacks --env-secret; update it before passing HF_TOKEN" >&2
   exit 1
@@ -199,7 +205,9 @@ create=(
   --subnet-id "$subnet_id"
   --restart-policy never
   --volume "$volume_spec"
-  --container-command /opt/vllm-job/run_job.sh
+  --inject-file "$SCRIPT_DIR/run_job.sh:/opt/vllm-job/run_job.sh"
+  --container-command /bin/bash
+  --args /opt/vllm-job/run_job.sh
   --env "VLLM_BENCHMARK_ARGS_B64=${benchmark_args_b64}"
   --env "VLLM_REPO_URL=${repo_url}"
   --env "VLLM_SOURCE_REVISION=${vllm_revision}"

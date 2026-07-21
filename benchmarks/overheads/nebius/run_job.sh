@@ -5,6 +5,7 @@
 set -Eeuo pipefail
 
 PYTHON=${VLLM_PYTHON:-python3}
+NSIGHT_SYSTEMS_PACKAGE=${NSIGHT_SYSTEMS_PACKAGE:-cuda-nsight-systems-13-0}
 REPO_URL=${VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
 SOURCE_REVISION=${VLLM_SOURCE_REVISION:-proton-profiler-clean}
 BENCHMARK_SOURCE_REVISION=${VLLM_BENCHMARK_SOURCE_REVISION:-profiler-overhead-benchmarks}
@@ -19,6 +20,21 @@ SYNC_INTERVAL=${VLLM_SYNC_INTERVAL:-300}
 EXPECTED_GPUS=${VLLM_EXPECTED_GPUS:-8}
 PERSIST_DIR=$RESULTS_MOUNT/$JOB_NAME
 SYNC_PID=
+
+install_bootstrap_dependencies() {
+  local packages=()
+  command -v git >/dev/null || packages+=(git)
+  command -v rsync >/dev/null || packages+=(rsync)
+  command -v nsys >/dev/null || packages+=("$NSIGHT_SYSTEMS_PACKAGE")
+  if ((${#packages[@]})); then
+    apt-get update
+    apt-get install -y --no-install-recommends "${packages[@]}"
+    rm -rf /var/lib/apt/lists/*
+  fi
+  uv pip install --system huggingface_hub matplotlib ninja
+}
+
+install_bootstrap_dependencies
 
 if [[ $STORAGE_MODE == filesystem ]]; then
   WORK_DIR=$PERSIST_DIR

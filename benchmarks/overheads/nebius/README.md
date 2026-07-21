@@ -4,24 +4,31 @@ This wrapper submits the profiler-overhead benchmark as a one-shot Nebius Job.
 It requests one eight-GPU node, runs the existing resumable matrix, persists
 results, and releases the compute resources when the container exits.
 
-## Build and push the reusable bootstrap image
+## Image choice
 
-The bootstrap image contains the CUDA/PyTorch environment, Nsight Systems, and
-the small Job entrypoint. It does not contain the vLLM PR or benchmark source,
-so it can be reused across revisions:
+No custom image is required. Use an official vLLM image; the submitter injects
+the small Job entrypoint with Nebius `--inject-file`. At startup, it installs
+missing profiling tools and clones the selected source revisions:
+
+```bash
+image="docker.io/vllm/vllm-openai:nightly"
+```
+
+For reproducible runs, resolve the tag once and submit its immutable digest.
+The runtime defaults to `cuda-nsight-systems-13-0`; set
+`NSIGHT_SYSTEMS_PACKAGE` when using a base image with another CUDA release.
+
+For repeated Jobs, the optional `nebius/Dockerfile` preinstalls nsys, git,
+rsync, and Python utilities to shorten startup. It still contains no PR or
+benchmark source and therefore does not need rebuilding for each revision:
 
 ```bash
 docker build -f benchmarks/overheads/nebius/Dockerfile \
-  --build-arg "VLLM_IMAGE=vllm/vllm-openai:nightly" \
+  --build-arg "VLLM_IMAGE=$image" \
   -t "cr.<region>.nebius.cloud/<registry>/vllm-profiler:bootstrap-cu130" .
 docker push \
   "cr.<region>.nebius.cloud/<registry>/vllm-profiler:bootstrap-cu130"
 ```
-
-The image defaults to the `cuda-nsight-systems-13-0` package matching a CUDA 13
-base image. Override `NSIGHT_SYSTEMS_PACKAGE` if the base uses another CUDA
-release. Rebuild this image only when the base environment or profiling tools
-change, not for every vLLM commit.
 
 At Job startup, the runner clones the requested vLLM revision and installs it
 in editable mode with `VLLM_USE_PRECOMPILED=1`. vLLM selects the PR merge-base
@@ -55,7 +62,7 @@ that supports `--env-secret`; do not put an HF token in `--env`.
 
 ```bash
 benchmarks/overheads/nebius/submit_job.sh \
-  --image cr.<region>.nebius.cloud/<registry>/vllm-profiler@sha256:<digest> \
+  --image docker.io/vllm/vllm-openai@sha256:<digest> \
   --volume-source storagebucket-<id> \
   --storage-mode object \
   --hf-secret hf-token \
