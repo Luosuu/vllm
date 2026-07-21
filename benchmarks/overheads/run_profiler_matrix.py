@@ -278,7 +278,8 @@ def case_signature(command: list[str], metadata: dict[str, Any]) -> str:
     scripts = (Path(__file__).resolve(), Path(command[1]).resolve())
     payload = {
         "command": command,
-        "git_revision": metadata["git_revision"],
+        "vllm_revision": metadata["vllm_revision"],
+        "benchmark_revision": metadata["benchmark_revision"],
         "python_packages": metadata["python_packages"],
         "scripts": {
             str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in scripts
@@ -559,8 +560,8 @@ def environment_metadata(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "arguments": vars(args) | {"output_dir": str(args.output_dir)},
-        "git_revision": os.environ.get("VLLM_BENCHMARK_REVISION")
-        or os.environ.get("VLLM_BUILD_COMMIT")
+        "vllm_revision": os.environ.get("VLLM_BUILD_COMMIT") or "unknown",
+        "benchmark_revision": os.environ.get("VLLM_BENCHMARK_REVISION")
         or output(["git", "rev-parse", "HEAD"]),
         "nvidia_smi": output(["nvidia-smi", "-L"]),
         "nsys_version": output([args.nsys_path, "--version"]),

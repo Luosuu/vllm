@@ -4,9 +4,13 @@
 
 set -Eeuo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-OVERHEAD_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 PYTHON=${VLLM_PYTHON:-python3}
+REPO_URL=${VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
+SOURCE_REVISION=${VLLM_SOURCE_REVISION:-proton-profiler-clean}
+BENCHMARK_SOURCE_REVISION=${VLLM_BENCHMARK_SOURCE_REVISION:-profiler-overhead-benchmarks}
+SOURCE_DIR=${VLLM_SOURCE_DIR:-/workspace/vllm-source}
+BENCHMARK_DIR=${VLLM_BENCHMARK_DIR:-/workspace/vllm-benchmark}
+OVERHEAD_DIR=$BENCHMARK_DIR/benchmarks/overheads
 RESULTS_MOUNT=${VLLM_RESULTS_MOUNT:-/mnt/vllm-profile-results}
 JOB_NAME=${VLLM_JOB_NAME:-vllm-profile-job}
 STORAGE_MODE=${VLLM_STORAGE_MODE:-object}
@@ -65,6 +69,13 @@ path.write_text(json.dumps({
     "storage_mode": os.environ.get("VLLM_STORAGE_MODE"),
     "platform": os.environ.get("NEBIUS_PLATFORM"),
     "preset": os.environ.get("NEBIUS_PRESET"),
+    "repository": os.environ.get("VLLM_REPO_URL"),
+    "requested_vllm_revision": os.environ.get("VLLM_SOURCE_REVISION"),
+    "vllm_commit": os.environ.get("VLLM_BUILD_COMMIT"),
+    "requested_benchmark_revision": os.environ.get(
+        "VLLM_BENCHMARK_SOURCE_REVISION"
+    ),
+    "benchmark_commit": os.environ.get("VLLM_BENCHMARK_REVISION"),
 }, indent=2) + "\n")
 ' "$WORK_DIR/job_status.json" "$status" "$exit_code"
 }
@@ -102,6 +113,20 @@ printf '%s' "${VLLM_BENCHMARK_ARGS_B64:-}" | base64 -d >"$args_file"
 mapfile -d '' -t BENCHMARK_ARGS <"$args_file"
 rm -f "$args_file"
 
+checkout_revision() {
+  local destination=$1
+  local revision=$2
+  local sparse_path=${3:-}
+
+  git clone --filter=blob:none --no-checkout "$REPO_URL" "$destination"
+  if [[ -n $sparse_path ]]; then
+    git -C "$destination" sparse-checkout set "$sparse_path"
+  fi
+  git -C "$destination" fetch origin "$revision"
+  git -C "$destination" checkout --detach FETCH_HEAD
+  git -C "$destination" rev-parse HEAD
+}
+
 gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 if [[ $gpu_count != "$EXPECTED_GPUS" ]]; then
   echo "expected $EXPECTED_GPUS GPUs, found $gpu_count" >&2
@@ -110,6 +135,24 @@ fi
 nvidia-smi -L
 df -h "$WORK_DIR" "$RESULTS_MOUNT"
 nsys --version
+
+vllm_commit=$(checkout_revision "$SOURCE_DIR" "$SOURCE_REVISION")
+benchmark_commit=$(checkout_revision \
+  "$BENCHMARK_DIR" "$BENCHMARK_SOURCE_REVISION" benchmarks/overheads)
+export VLLM_BUILD_COMMIT=$vllm_commit
+export VLLM_BENCHMARK_REVISION=$benchmark_commit
+
+merge_base=$(git -C "$SOURCE_DIR" merge-base HEAD origin/main)
+if [[ -n $(git -C "$SOURCE_DIR" diff --name-only "$merge_base" HEAD -- \
+  CMakeLists.txt cmake csrc setup.py pyproject.toml rust vllm/vllm-rs) ]]; then
+  echo "the selected vLLM revision changes compiled/build inputs" >&2
+  echo "build an exact vLLM image instead of using precompiled extensions" >&2
+  exit 1
+fi
+
+VLLM_USE_PRECOMPILED=1 uv pip install --system --editable "$SOURCE_DIR" \
+  --torch-backend=auto
+
 "$PYTHON" -c '
 import triton.profiler as proton
 import vllm
@@ -120,6 +163,8 @@ if missing:
     raise RuntimeError(f"Triton Proton API is missing: {missing}")
 print(f"vLLM {vllm.__version__}; Proton API ready")
 '
+printf 'vLLM source: %s at %s\n' "$REPO_URL" "$vllm_commit"
+printf 'Benchmark source: %s at %s\n' "$REPO_URL" "$benchmark_commit"
 
 if [[ ${VLLM_JOB_PREFLIGHT_ONLY:-0} == 1 ]]; then
   printf 'Preflight passed. Matrix arguments:'
@@ -128,7 +173,7 @@ if [[ ${VLLM_JOB_PREFLIGHT_ONLY:-0} == 1 ]]; then
   exit 0
 fi
 
-env -u HF_HUB_OFFLINE "$PYTHON" "$SCRIPT_DIR/prepare_model_metadata.py" \
+env -u HF_HUB_OFFLINE "$PYTHON" "$OVERHEAD_DIR/nebius/prepare_model_metadata.py" \
   "${BENCHMARK_ARGS[@]}"
 
 write_status running 0

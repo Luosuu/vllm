@@ -4,25 +4,30 @@ This wrapper submits the profiler-overhead benchmark as a one-shot Nebius Job.
 It requests one eight-GPU node, runs the existing resumable matrix, persists
 results, and releases the compute resources when the container exits.
 
-## Build and push the image
+## Build and push the reusable bootstrap image
 
-Build the vLLM image from the exact source revision under test, then add the
-benchmark Job layer:
+The bootstrap image contains the CUDA/PyTorch environment, Nsight Systems, and
+the small Job entrypoint. It does not contain the vLLM PR or benchmark source,
+so it can be reused across revisions:
 
 ```bash
-revision=$(git rev-parse --short=12 HEAD)
-docker build --target vllm-openai -f docker/Dockerfile \
-  --build-arg VLLM_BUILD_COMMIT="$revision" \
-  -t "vllm-profiler-base:$revision" .
 docker build -f benchmarks/overheads/nebius/Dockerfile \
-  --build-arg "VLLM_IMAGE=vllm-profiler-base:$revision" \
-  -t "cr.<region>.nebius.cloud/<registry>/vllm-profiler:$revision" .
-docker push "cr.<region>.nebius.cloud/<registry>/vllm-profiler:$revision"
+  --build-arg "VLLM_IMAGE=vllm/vllm-openai:nightly" \
+  -t "cr.<region>.nebius.cloud/<registry>/vllm-profiler:bootstrap-cu130" .
+docker push \
+  "cr.<region>.nebius.cloud/<registry>/vllm-profiler:bootstrap-cu130"
 ```
 
-The Job layer defaults to the `cuda-nsight-systems-13-0` package matching this
-vLLM branch's CUDA 13 image. Override `NSIGHT_SYSTEMS_PACKAGE` at build time if
-the selected base image uses another CUDA release.
+The image defaults to the `cuda-nsight-systems-13-0` package matching a CUDA 13
+base image. Override `NSIGHT_SYSTEMS_PACKAGE` if the base uses another CUDA
+release. Rebuild this image only when the base environment or profiling tools
+change, not for every vLLM commit.
+
+At Job startup, the runner clones the requested vLLM revision and installs it
+in editable mode with `VLLM_USE_PRECOMPILED=1`. vLLM selects the PR merge-base
+wheel and reuses its compiled extensions, so Python-only PRs do not trigger a
+CUDA build. The runner refuses revisions that change common compiled/build
+inputs; those revisions require an exact source-built image.
 
 Use an immutable image digest for submitted runs. A registry in the same
 Nebius project does not require credentials in the Job configuration.
@@ -54,6 +59,9 @@ benchmarks/overheads/nebius/submit_job.sh \
   --volume-source storagebucket-<id> \
   --storage-mode object \
   --hf-secret hf-token \
+  --repo-url https://github.com/Luosuu/vllm.git \
+  --vllm-revision <vllm-pr-commit-sha> \
+  --benchmark-revision <benchmark-commit-sha> \
   --graph-modes "cudagraph eager" \
   -- \
   --models gpt-oss-20b gpt-oss-120b mixtral-8x7b qwen3-32b \
@@ -66,6 +74,11 @@ benchmarks/overheads/nebius/submit_job.sh \
   --no-finalize-non-proton \
   --profile-retention all
 ```
+
+Branch names are accepted when intentionally testing their latest state, but
+full commit hashes make separate Jobs reproducible. The runner records both
+the requested refs and resolved commit hashes in `job_status.json` and matrix
+environment metadata.
 
 The default resource request is `gpu-h100-sxm` with the
 `8gpu-128vcpu-1600gb` preset, a 1 TiB container disk, 64 GiB `/dev/shm`, and a

@@ -30,6 +30,9 @@ Submission options:
   --job-name NAME               Default: vllm-profile-<UTC timestamp>.
   --graph-modes "MODES"         Default: cudagraph.
   --sync-interval SECONDS       Object-store checkpoint interval (default: 300).
+  --repo-url URL                vLLM fork to clone in the Job.
+  --vllm-revision REV           vLLM PR branch/commit under test.
+  --benchmark-revision REV      Benchmark branch/commit to run.
   --hf-secret SELECTOR          MysteryBox secret for HF_TOKEN.
   --registry-secret SELECTOR    MysteryBox registry credential secret.
   --preemptible                 Request a preemptible VM.
@@ -58,6 +61,9 @@ job_timeout=${NEBIUS_JOB_TIMEOUT:-24h}
 job_name=${NEBIUS_JOB_NAME:-vllm-profile-$(date -u +%Y%m%d-%H%M%S)}
 graph_modes=${NEBIUS_GRAPH_MODES:-cudagraph}
 sync_interval=${NEBIUS_SYNC_INTERVAL:-300}
+repo_url=${NEBIUS_VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
+vllm_revision=${NEBIUS_VLLM_REVISION:-proton-profiler-clean}
+benchmark_revision=${NEBIUS_BENCHMARK_REVISION:-profiler-overhead-benchmarks}
 hf_secret=${NEBIUS_HF_SECRET:-}
 registry_secret=${NEBIUS_REGISTRY_SECRET:-}
 preemptible=${NEBIUS_PREEMPTIBLE:-0}
@@ -83,6 +89,9 @@ while (($#)); do
     --job-name) job_name=$2; shift 2 ;;
     --graph-modes) graph_modes=$2; shift 2 ;;
     --sync-interval) sync_interval=$2; shift 2 ;;
+    --repo-url) repo_url=$2; shift 2 ;;
+    --vllm-revision) vllm_revision=$2; shift 2 ;;
+    --benchmark-revision) benchmark_revision=$2; shift 2 ;;
     --hf-secret) hf_secret=$2; shift 2 ;;
     --registry-secret) registry_secret=$2; shift 2 ;;
     --preemptible) preemptible=1; shift ;;
@@ -105,6 +114,12 @@ command -v jq >/dev/null || {
   exit 1
 }
 [[ -n $image ]] || { echo "--image is required" >&2; exit 2; }
+[[ -n $repo_url ]] || { echo "--repo-url is required" >&2; exit 2; }
+[[ -n $vllm_revision ]] || { echo "--vllm-revision is required" >&2; exit 2; }
+[[ -n $benchmark_revision ]] || {
+  echo "--benchmark-revision is required" >&2
+  exit 2
+}
 [[ -n $volume_source ]] || {
   echo "--volume-source is required so results survive the Job" >&2
   exit 2
@@ -184,8 +199,11 @@ create=(
   --subnet-id "$subnet_id"
   --restart-policy never
   --volume "$volume_spec"
-  --container-command /opt/vllm-benchmark/benchmarks/overheads/nebius/run_job.sh
+  --container-command /opt/vllm-job/run_job.sh
   --env "VLLM_BENCHMARK_ARGS_B64=${benchmark_args_b64}"
+  --env "VLLM_REPO_URL=${repo_url}"
+  --env "VLLM_SOURCE_REVISION=${vllm_revision}"
+  --env "VLLM_BENCHMARK_SOURCE_REVISION=${benchmark_revision}"
   --env "VLLM_GRAPH_MODES=${graph_modes}"
   --env "VLLM_STORAGE_MODE=${storage_mode}"
   --env "VLLM_RESULTS_MOUNT=${results_mount}"
