@@ -143,6 +143,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=600,
         help="Maximum seconds to finalize profiler output; zero disables it.",
     )
+    parser.add_argument(
+        "--finalize-non-proton",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Finalize Torch and nsys traces after metrics are saved. Disable this "
+            "when only their runtime overhead is needed."
+        ),
+    )
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -330,6 +339,11 @@ def build_command(
         args.all2all_backend,
         "--profile-save-timeout",
         str(args.profile_save_timeout),
+        (
+            "--finalize-non-proton"
+            if args.finalize_non_proton
+            else "--no-finalize-non-proton"
+        ),
     ]
     if args.max_concurrency is not None:
         command.extend(["--max-concurrency", str(args.max_concurrency)])

@@ -146,6 +146,7 @@ GRAPH_MODES="cudagraph eager" \
   --max-concurrency 256 \
   --max-num-seqs 256 \
   --max-num-batched-tokens 8192 \
+  --no-finalize-non-proton \
   --profile-save-timeout 600 \
   --output-dir profiler-matrix-tp2
 ```
@@ -238,6 +239,11 @@ marked with:
 profile_save_failed = true
 profile_save_error = "profile save exceeded ... seconds"
 ```
+
+When only runtime overhead is needed, pass `--no-finalize-non-proton`. Torch
+and nsys collection is terminated immediately after `vllm bench serve` saves
+its metrics, while Proton is still finalized normally. Results record
+`profile_finalize_skipped=true` for those Torch and nsys runs.
 
 Save failures also appear in `failures.csv` with
 `failure_type=profile_save`. They do not discard throughput or latency rows.

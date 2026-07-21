@@ -121,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-ready-timeout", type=float, default=900)
     parser.add_argument("--server-shutdown-timeout", type=float, default=3600)
     parser.add_argument("--profile-save-timeout", type=float, default=600)
+    add_bool_argument(parser, "--finalize-non-proton", True)
     parser.add_argument("--output-dir", type=Path, default=Path("serving_profiler"))
     parser.add_argument("--fail-fast", action="store_true")
     return parser
@@ -510,6 +511,7 @@ def run_once(
         nsys_shutdown_complete = False
         profile_save_error: str | None = None
         profile_save_s = 0.0
+        profile_finalize_skipped = False
         try:
             wait_until_ready(server, args.host, port, args.server_ready_timeout)
             if args.num_warmups:
@@ -607,7 +609,8 @@ def run_once(
                     f"expected {expected_output} output tokens, got "
                     f"{metrics['total_output_tokens']}"
                 )
-            if case["profiler"] in ("proton", "torch"):
+            should_finalize = case["profiler"] == "proton" or args.finalize_non_proton
+            if case["profiler"] in ("proton", "torch") and should_finalize:
                 profile_save_start = time.monotonic()
                 try:
                     profile_request(
@@ -625,7 +628,7 @@ def run_once(
                     profile_save_error = f"stop_profile failed: {exc}"
                     kill_process_group(server)
                 profile_save_s = time.monotonic() - profile_save_start
-            if nsys_session is not None:
+            if nsys_session is not None and should_finalize:
                 profile_save_start = time.monotonic()
                 with (run_dir / "nsys_stop.log").open("w") as nsys_stop_log:
                     nsys_stop = subprocess.Popen(
@@ -657,6 +660,12 @@ def run_once(
                         kill_process_group(nsys_start)
                     shutdown_nsys_session(args, nsys_session, "sigterm", env)
                     nsys_shutdown_complete = True
+            if case["profiler"] in ("torch", "nsys") and not should_finalize:
+                profile_finalize_skipped = True
+                if nsys_session is not None:
+                    shutdown_nsys_session(args, nsys_session, "sigkill", env)
+                    nsys_shutdown_complete = True
+                kill_process_group(server)
         finally:
             if nsys_session is not None and not nsys_shutdown_complete:
                 shutdown_nsys_session(args, nsys_session, "sigkill", env)
@@ -671,7 +680,7 @@ def run_once(
                 f"profile save exceeded {shutdown_timeout:g} seconds during shutdown"
             )
     profile_bytes = directory_size(profile_dir)
-    if case["profiler"] != "none":
+    if case["profiler"] != "none" and not profile_finalize_skipped:
         server_output = server_log_path.read_text()
         if (
             profile_save_error is None
@@ -716,6 +725,7 @@ def run_once(
         "server_shutdown_s": shutdown_s,
         "profile_bytes": profile_bytes,
         "profile_save_s": profile_save_s,
+        "profile_finalize_skipped": profile_finalize_skipped,
         "profile_save_failed": profile_save_error is not None,
         "profile_save_error": profile_save_error,
         "metrics": metrics,
