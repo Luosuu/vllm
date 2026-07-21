@@ -559,7 +559,9 @@ def environment_metadata(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "arguments": vars(args) | {"output_dir": str(args.output_dir)},
-        "git_revision": output(["git", "rev-parse", "HEAD"]),
+        "git_revision": os.environ.get("VLLM_BENCHMARK_REVISION")
+        or os.environ.get("VLLM_BUILD_COMMIT")
+        or output(["git", "rev-parse", "HEAD"]),
         "nvidia_smi": output(["nvidia-smi", "-L"]),
         "nsys_version": output([args.nsys_path, "--version"]),
         "python_packages": output(

@@ -279,6 +279,14 @@ The matrix is resumable. Re-running the same command skips cases whose command,
 Git revision, package versions, and script hashes match. Use `--force` to rerun
 completed cases.
 
+## Nebius Serverless AI Jobs
+
+The [Nebius Job wrapper](nebius/README.md) builds an immutable benchmark image
+and submits this matrix to an eight-GPU Serverless AI Job with one command. It
+supports both shared filesystems and Object Storage for persistent results,
+secure Hugging Face tokens through MysteryBox, log following, and dry-run
+submission.
+
 ## Running one custom configuration
 
 Use the lower-level runner for a model or configuration not represented by the
