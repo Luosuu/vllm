@@ -10,7 +10,7 @@ USER root
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        "${NSIGHT_SYSTEMS_PACKAGE}" git rsync \
+        "${NSIGHT_SYSTEMS_PACKAGE}" git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN uv pip install --system huggingface_hub matplotlib ninja

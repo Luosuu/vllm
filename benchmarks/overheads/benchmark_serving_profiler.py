@@ -8,6 +8,7 @@ import csv
 import json
 import os
 import random
+import shutil
 import signal
 import socket
 import statistics
@@ -231,7 +232,7 @@ def server_command(
 ) -> list[str]:
     _, _, per_engine_max_num_seqs = scheduler_limits(args)
     command = [
-        str(Path(sys.executable).with_name("vllm")),
+        shutil.which("vllm") or str(Path(sys.executable).with_name("vllm")),
         "serve",
         args.model,
         "--host",
@@ -306,7 +307,7 @@ def bench_command(
     profile: bool,
 ) -> list[str]:
     command = [
-        str(Path(sys.executable).with_name("vllm")),
+        shutil.which("vllm") or str(Path(sys.executable).with_name("vllm")),
         "bench",
         "serve",
         "--backend",

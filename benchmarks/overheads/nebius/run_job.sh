@@ -25,7 +25,6 @@ SYNC_PID=
 install_bootstrap_dependencies() {
   local packages=()
   command -v git >/dev/null || packages+=(git)
-  command -v rsync >/dev/null || packages+=(rsync)
   command -v nsys >/dev/null || packages+=("$NSIGHT_SYSTEMS_PACKAGE")
   if ((${#packages[@]})); then
     apt-get update
@@ -51,20 +50,25 @@ mkdir -p "$PERSIST_DIR" "$WORK_DIR"
 sync_results() {
   local mode=${1:-checkpoint}
   [[ $STORAGE_MODE == object ]] || return 0
-  local options=(-r --inplace --delete --exclude='*.tmp')
-  if [[ $mode != final ]]; then
-    options+=(--exclude='profiles/')
+  if [[ $mode == final ]]; then
+    rm -rf "$PERSIST_DIR"
+    mkdir -p "$PERSIST_DIR"
+    cp -R "$WORK_DIR/." "$PERSIST_DIR/"
+    return
   fi
-  rsync "${options[@]}" "$WORK_DIR/" "$PERSIST_DIR/"
-  if [[ $mode != final ]]; then
-    local case_file case_dir relative
-    while IFS= read -r -d '' case_file; do
-      case_dir=$(dirname "$case_file")
-      relative=${case_dir#"$WORK_DIR"/}
-      mkdir -p "$PERSIST_DIR/$relative"
-      rsync -r --inplace --delete "$case_dir/" "$PERSIST_DIR/$relative/"
-    done < <(find "$WORK_DIR" -name case.json -type f -print0)
+  if [[ -f $WORK_DIR/job_status.json ]]; then
+    rm -f "$PERSIST_DIR/job_status.json"
+    cp "$WORK_DIR/job_status.json" "$PERSIST_DIR/job_status.json"
   fi
+  local case_file case_dir relative destination
+  while IFS= read -r -d '' case_file; do
+    case_dir=$(dirname "$case_file")
+    relative=${case_dir#"$WORK_DIR"/}
+    destination=$PERSIST_DIR/$relative
+    rm -rf "$destination"
+    mkdir -p "$(dirname "$destination")"
+    cp -R "$case_dir" "$destination"
+  done < <(find "$WORK_DIR" -name case.json -type f -print0)
 }
 
 write_status() {
@@ -122,7 +126,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [[ $STORAGE_MODE == object && -n $(find "$PERSIST_DIR" -mindepth 1 -print -quit) ]]; then
-  rsync -r "$PERSIST_DIR/" "$WORK_DIR/"
+  cp -R "$PERSIST_DIR/." "$WORK_DIR/"
 fi
 
 args_file=$(mktemp)

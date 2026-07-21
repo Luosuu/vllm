@@ -18,8 +18,8 @@ For reproducible runs, resolve the tag once and submit its immutable digest.
 The runtime defaults to `cuda-nsight-systems-13-0`; set
 `NSIGHT_SYSTEMS_PACKAGE` when using a base image with another CUDA release.
 
-For repeated Jobs, the optional `nebius/Dockerfile` preinstalls nsys, git,
-rsync, and Python utilities to shorten startup. It still contains no PR or
+For repeated Jobs, the optional `nebius/Dockerfile` preinstalls nsys, git, and
+Python utilities to shorten startup. It still contains no PR or
 benchmark source and therefore does not need rebuilding for each revision:
 
 ```bash
