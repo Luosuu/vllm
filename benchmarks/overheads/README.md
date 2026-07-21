@@ -100,7 +100,7 @@ The default matrix includes:
 For eight GPUs, ordinary TP cases map to:
 
 | TP | DP | GPUs used | Per-engine `max_num_seqs` with global concurrency 256 |
-|---:|---:|----------:|------------------------------------------------------:|
+| ---: | ---: | --------: | ----------------------------------------------------: |
 | 2 | 4 | 8 | 64 |
 | 4 | 2 | 8 | 128 |
 | 8 | 1 | 8 | 256 |
@@ -130,6 +130,25 @@ GRAPH_MODES="cudagraph eager" \
 ```
 
 The setup script accepts all matrix-runner arguments after `--run`.
+
+To run only the `TP=2, DP=4` cases once and omit the additional MoE expert-
+parallel cases:
+
+```bash
+GRAPH_MODES="cudagraph eager" \
+./benchmarks/overheads/setup_profiler_matrix.sh --run \
+  --total-gpus 8 \
+  --tp-sizes 2 \
+  --skip-ep-cases \
+  --repeats 1 \
+  --num-prompts 2048 \
+  --num-warmups 512 \
+  --max-concurrency 256 \
+  --max-num-seqs 256 \
+  --max-num-batched-tokens 8192 \
+  --profile-save-timeout 600 \
+  --output-dir profiler-matrix-tp2
+```
 
 ## Measurement methodology
 

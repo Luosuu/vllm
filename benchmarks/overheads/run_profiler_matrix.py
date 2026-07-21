@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=(2, 4, 8))
     parser.add_argument("--ep-sizes", nargs="+", type=int, default=(2, 4, 8))
     parser.add_argument(
+        "--skip-ep-cases",
+        action="store_true",
+        help="Skip the additional expert-parallel cases for MoE models.",
+    )
+    parser.add_argument(
         "--total-gpus",
         type=int,
         default=8,
@@ -188,7 +193,7 @@ def make_cases(args: argparse.Namespace) -> list[MatrixCase]:
                             profiler,
                         )
                     )
-            if is_moe:
+            if is_moe and not args.skip_ep_cases:
                 for size in args.ep_sizes:
                     for profiler in args.profilers:
                         cases.append(
