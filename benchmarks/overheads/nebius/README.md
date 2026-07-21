@@ -36,6 +36,10 @@ wheel and reuses its compiled extensions, so Python-only PRs do not trigger a
 CUDA build. The runner refuses revisions that change common compiled/build
 inputs; those revisions require an exact source-built image.
 
+The merge-base is computed against `https://github.com/vllm-project/vllm.git`,
+not the fork's `main` branch. Override it with `--upstream-repo-url` only when
+the PR targets another upstream repository.
+
 Use an immutable image digest for submitted runs. A registry in the same
 Nebius project does not require credentials in the Job configuration.
 

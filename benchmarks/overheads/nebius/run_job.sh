@@ -7,6 +7,7 @@ set -Eeuo pipefail
 PYTHON=${VLLM_PYTHON:-python3}
 NSIGHT_SYSTEMS_PACKAGE=${NSIGHT_SYSTEMS_PACKAGE:-cuda-nsight-systems-13-0}
 REPO_URL=${VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
+UPSTREAM_REPO_URL=${VLLM_UPSTREAM_REPO_URL:-https://github.com/vllm-project/vllm.git}
 SOURCE_REVISION=${VLLM_SOURCE_REVISION:-proton-profiler-clean}
 BENCHMARK_SOURCE_REVISION=${VLLM_BENCHMARK_SOURCE_REVISION:-profiler-overhead-benchmarks}
 SOURCE_DIR=${VLLM_SOURCE_DIR:-/workspace/vllm-source}
@@ -50,7 +51,7 @@ mkdir -p "$PERSIST_DIR" "$WORK_DIR"
 sync_results() {
   local mode=${1:-checkpoint}
   [[ $STORAGE_MODE == object ]] || return 0
-  local options=(-a --delete --exclude='*.tmp')
+  local options=(-r --delete --exclude='*.tmp')
   if [[ $mode != final ]]; then
     options+=(--exclude='profiles/')
   fi
@@ -61,7 +62,7 @@ sync_results() {
       case_dir=$(dirname "$case_file")
       relative=${case_dir#"$WORK_DIR"/}
       mkdir -p "$PERSIST_DIR/$relative"
-      rsync -a --delete "$case_dir/" "$PERSIST_DIR/$relative/"
+      rsync -r --delete "$case_dir/" "$PERSIST_DIR/$relative/"
     done < <(find "$WORK_DIR" -name case.json -type f -print0)
   fi
 }
@@ -121,7 +122,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [[ $STORAGE_MODE == object && -n $(find "$PERSIST_DIR" -mindepth 1 -print -quit) ]]; then
-  rsync -a "$PERSIST_DIR/" "$WORK_DIR/"
+  rsync -r "$PERSIST_DIR/" "$WORK_DIR/"
 fi
 
 args_file=$(mktemp)
@@ -158,7 +159,9 @@ benchmark_commit=$(checkout_revision \
 export VLLM_BUILD_COMMIT=$vllm_commit
 export VLLM_BENCHMARK_REVISION=$benchmark_commit
 
-merge_base=$(git -C "$SOURCE_DIR" merge-base HEAD origin/main)
+git -C "$SOURCE_DIR" remote add upstream "$UPSTREAM_REPO_URL"
+git -C "$SOURCE_DIR" fetch --filter=blob:none upstream main
+merge_base=$(git -C "$SOURCE_DIR" merge-base HEAD upstream/main)
 if [[ -n $(git -C "$SOURCE_DIR" diff --name-only "$merge_base" HEAD -- \
   CMakeLists.txt cmake csrc setup.py pyproject.toml rust vllm/vllm-rs) ]]; then
   echo "the selected vLLM revision changes compiled/build inputs" >&2
@@ -166,8 +169,8 @@ if [[ -n $(git -C "$SOURCE_DIR" diff --name-only "$merge_base" HEAD -- \
   exit 1
 fi
 
-VLLM_USE_PRECOMPILED=1 uv pip install --system --editable "$SOURCE_DIR" \
-  --torch-backend=auto
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base \
+  uv pip install --system --editable "$SOURCE_DIR" --torch-backend=auto
 
 "$PYTHON" -c '
 import triton.profiler as proton

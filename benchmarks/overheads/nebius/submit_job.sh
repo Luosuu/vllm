@@ -33,6 +33,7 @@ Submission options:
   --graph-modes "MODES"         Default: cudagraph.
   --sync-interval SECONDS       Object-store checkpoint interval (default: 300).
   --repo-url URL                vLLM fork to clone in the Job.
+  --upstream-repo-url URL       Upstream used to find the PR merge-base.
   --vllm-revision REV           vLLM PR branch/commit under test.
   --benchmark-revision REV      Benchmark branch/commit to run.
   --hf-secret SELECTOR          MysteryBox secret for HF_TOKEN.
@@ -64,6 +65,7 @@ job_name=${NEBIUS_JOB_NAME:-vllm-profile-$(date -u +%Y%m%d-%H%M%S)}
 graph_modes=${NEBIUS_GRAPH_MODES:-cudagraph}
 sync_interval=${NEBIUS_SYNC_INTERVAL:-300}
 repo_url=${NEBIUS_VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
+upstream_repo_url=${NEBIUS_VLLM_UPSTREAM_REPO_URL:-https://github.com/vllm-project/vllm.git}
 vllm_revision=${NEBIUS_VLLM_REVISION:-proton-profiler-clean}
 benchmark_revision=${NEBIUS_BENCHMARK_REVISION:-profiler-overhead-benchmarks}
 hf_secret=${NEBIUS_HF_SECRET:-}
@@ -92,6 +94,7 @@ while (($#)); do
     --graph-modes) graph_modes=$2; shift 2 ;;
     --sync-interval) sync_interval=$2; shift 2 ;;
     --repo-url) repo_url=$2; shift 2 ;;
+    --upstream-repo-url) upstream_repo_url=$2; shift 2 ;;
     --vllm-revision) vllm_revision=$2; shift 2 ;;
     --benchmark-revision) benchmark_revision=$2; shift 2 ;;
     --hf-secret) hf_secret=$2; shift 2 ;;
@@ -117,6 +120,10 @@ command -v jq >/dev/null || {
 }
 [[ -n $image ]] || { echo "--image is required" >&2; exit 2; }
 [[ -n $repo_url ]] || { echo "--repo-url is required" >&2; exit 2; }
+[[ -n $upstream_repo_url ]] || {
+  echo "--upstream-repo-url is required" >&2
+  exit 2
+}
 [[ -n $vllm_revision ]] || { echo "--vllm-revision is required" >&2; exit 2; }
 [[ -n $benchmark_revision ]] || {
   echo "--benchmark-revision is required" >&2
@@ -210,6 +217,7 @@ create=(
   --args /opt/vllm-job/run_job.sh
   --env "VLLM_BENCHMARK_ARGS_B64=${benchmark_args_b64}"
   --env "VLLM_REPO_URL=${repo_url}"
+  --env "VLLM_UPSTREAM_REPO_URL=${upstream_repo_url}"
   --env "VLLM_SOURCE_REVISION=${vllm_revision}"
   --env "VLLM_BENCHMARK_SOURCE_REVISION=${benchmark_revision}"
   --env "VLLM_GRAPH_MODES=${graph_modes}"
