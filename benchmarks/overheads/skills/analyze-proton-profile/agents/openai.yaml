@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze Proton Profile"
+  short_description: "Diagnose vLLM Proton profiles with an LLM taxonomy"
+  default_prompt: "Use $analyze-proton-profile to diagnose this vLLM Proton trace with the taxonomy and report evidence-backed bottlenecks."
