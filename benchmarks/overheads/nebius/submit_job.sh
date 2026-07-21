@@ -22,7 +22,7 @@ Submission options:
   --parent-id ID                Nebius project ID; profile default if omitted.
   --subnet-id ID                Subnet ID; otherwise resolve --subnet-name.
   --subnet-name NAME            Subnet name (default: default-subnet).
-  --platform PLATFORM           Default: gpu-h200-sxm.
+  --platform PLATFORM           Default: gpu-h100-sxm.
   --preset PRESET               Default: 8gpu-128vcpu-1600gb.
   --disk-size SIZE              Default: 1Ti.
   --shm-size SIZE               Default: 64Gi.
@@ -50,7 +50,7 @@ profile=${NEBIUS_PROFILE:-}
 parent_id=${NEBIUS_PARENT_ID:-}
 subnet_id=${NEBIUS_SUBNET_ID:-}
 subnet_name=${NEBIUS_SUBNET_NAME:-default-subnet}
-platform=${NEBIUS_PLATFORM:-gpu-h200-sxm}
+platform=${NEBIUS_PLATFORM:-gpu-h100-sxm}
 preset=${NEBIUS_PRESET:-8gpu-128vcpu-1600gb}
 disk_size=${NEBIUS_DISK_SIZE:-1Ti}
 shm_size=${NEBIUS_SHM_SIZE:-64Gi}
@@ -140,7 +140,25 @@ if [[ -z $subnet_id ]]; then
     subnet_id='<resolved-subnet-id>'
   else
     subnet_id=$("${nebius_cmd[@]}" vpc subnet get-by-name \
-      --name "$subnet_name" --format jsonpath='{.metadata.id}')
+      --name "$subnet_name" --format jsonpath='{.metadata.id}' 2>/dev/null || true)
+    if [[ -z $subnet_id ]]; then
+      resolved_parent=$parent_id
+      if [[ -z $resolved_parent ]]; then
+        resolved_parent=$("${nebius_cmd[@]}" config get parent-id)
+      fi
+      subnets=$("${nebius_cmd[@]}" vpc subnet list \
+        --parent-id "$resolved_parent" --all --format json)
+      subnet_count=$(jq '.items | length' <<<"$subnets")
+      if [[ $subnet_count == 1 ]]; then
+        subnet_id=$(jq -er '.items[0].metadata.id' <<<"$subnets")
+      else
+        echo "subnet '$subnet_name' was not found and the project has $subnet_count subnets:" >&2
+        jq -r '.items[] | "  \(.metadata.name) (\(.metadata.id))"' \
+          <<<"$subnets" >&2
+        echo "pass --subnet-id or --subnet-name explicitly" >&2
+        exit 1
+      fi
+    fi
   fi
 fi
 

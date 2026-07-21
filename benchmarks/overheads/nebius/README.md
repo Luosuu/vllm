@@ -67,7 +67,7 @@ benchmarks/overheads/nebius/submit_job.sh \
   --profile-retention all
 ```
 
-The default resource request is `gpu-h200-sxm` with the
+The default resource request is `gpu-h100-sxm` with the
 `8gpu-128vcpu-1600gb` preset, a 1 TiB container disk, 64 GiB `/dev/shm`, and a
 24-hour timeout. Override these with submission flags when the project exposes
 another platform or preset.
