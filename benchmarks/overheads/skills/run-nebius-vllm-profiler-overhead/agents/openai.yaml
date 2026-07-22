@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nebius vLLM Profiler Benchmark"
+  short_description: "Submit and operate vLLM profiler matrices on Nebius"
+  default_prompt: "Use $run-nebius-vllm-profiler-overhead to submit and monitor a reproducible vLLM profiler-overhead matrix on Nebius."
