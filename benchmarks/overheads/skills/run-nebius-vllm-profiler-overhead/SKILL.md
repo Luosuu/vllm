@@ -108,7 +108,7 @@ shape unless the user requests another experiment:
 
 ```text
 --graph-modes cudagraph
---models gpt-oss-20b gpt-oss-120b mixtral-8x7b qwen3-32b
+--models gpt-oss-20b gpt-oss-120b mixtral-8x7b
 --workloads in2000_out500 in1000_out1000 in500_out2000
 --tp-sizes 2 --total-gpus 8 --skip-ep-cases
 --profilers proton torch nsys

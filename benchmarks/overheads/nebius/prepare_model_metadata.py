@@ -14,7 +14,7 @@ from huggingface_hub import snapshot_download
 OVERHEAD_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(OVERHEAD_DIR))
 
-from run_profiler_matrix import MODELS  # noqa: E402
+from run_profiler_matrix import DEFAULT_MODELS, MODELS  # noqa: E402
 
 ALLOW_PATTERNS = (
     "config.json",
@@ -31,7 +31,7 @@ ALLOW_PATTERNS = (
 
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=DEFAULT_MODELS)
     args, _ = parser.parse_known_args()
     for name in args.models:
         model_id, _ = MODELS[name]

@@ -24,6 +24,7 @@ MODELS = {
     "mixtral-8x7b": ("mistralai/Mixtral-8x7B-v0.1", True),
     "qwen3-32b": ("Qwen/Qwen3-32B", False),
 }
+DEFAULT_MODELS = tuple(name for name in MODELS if name != "qwen3-32b")
 WORKLOADS = {
     "in2000_out500": (2000, 500),
     "in1000_out1000": (1000, 1000),
@@ -47,7 +48,7 @@ class MatrixCase:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=DEFAULT_MODELS)
     parser.add_argument(
         "--workloads", nargs="+", choices=WORKLOADS, default=list(WORKLOADS)
     )

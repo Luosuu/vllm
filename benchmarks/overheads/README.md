@@ -91,8 +91,9 @@ Use `--dry-run` to inspect generated commands without starting servers:
 
 The default matrix includes:
 
-- Models: `gpt-oss-20b`, `gpt-oss-120b`, `llama-3.1-8b`,
-  `mixtral-8x7b`, and `qwen3-32b`.
+- Models: `gpt-oss-20b`, `gpt-oss-120b`, `llama-3.1-8b`, and
+  `mixtral-8x7b`. `qwen3-32b` remains available through an explicit
+  `--models qwen3-32b` but is temporarily excluded from the default matrix.
 - Workloads: input/output lengths `2000/500`, `1000/1000`, and
   `500/2000`.
 - Profilers: Proton, PyTorch profiler, and Nsight Systems.
