@@ -18,6 +18,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"  # paper-grade: 8192
 REPEATS="${REPEATS:-1}"                  # paper-grade: 3
 TP_SIZE="${TP_SIZE:-1}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-amd-overhead-results}"
+TABLE_FILE="${TABLE_FILE:-table.md}"    # table name under $OUTPUT_ROOT
 
 # ---- AMD environment requirements -------------------------------------------
 # Proton on AMD requires ROCR_VISIBLE_DEVICES and rejects HIP/CUDA_VISIBLE_DEVICES.
@@ -54,7 +55,7 @@ for mode in eager cudagraph; do
 done
 
 # ---- Generate the combined markdown table ------------------------------------
-python3 - "$OUTPUT_ROOT" <<'EOF' | tee "$OUTPUT_ROOT/table.md"
+python3 - "$OUTPUT_ROOT" <<'EOF' | tee "$OUTPUT_ROOT/$TABLE_FILE"
 import json
 import sys
 from pathlib import Path

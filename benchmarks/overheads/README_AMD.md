@@ -77,17 +77,22 @@ and cudagraph experiment sets (each pairs every profiler with a same-seed
 unprofiled baseline), then generates the table. Smoke scale takes roughly
 15–20 minutes on one MI300X.
 
-Scale-up example (paper-grade settings) via environment variables:
+For paper-grade numbers, use the full runner — a thin wrapper that sets
+2048 prompts, 512 warmups, concurrency 256, and 3 paired repeats
+(workload 2000:500 by default):
 
 ```bash
-NUM_PROMPTS=2048 NUM_WARMUPS=512 MAX_CONCURRENCY=256 \
-MAX_NUM_SEQS=256 MAX_NUM_BATCHED_TOKENS=8192 REPEATS=3 \
-LENGTH_PAIR=2000:500 \
-bash benchmarks/overheads/run_amd_overhead_smoke.sh
+bash benchmarks/overheads/run_amd_overhead_full.sh
 ```
 
+It writes to `amd-overhead-full/` and names the table `table_full.md` so it
+never clashes with a smoke run. Expect several hours on one MI300X
+(24 fresh server launches) and GB-scale torch traces per repeat. All the
+same environment variables still apply as overrides.
+
 Other knobs: `MODEL`, `TP_SIZE`, `OUTPUT_ROOT` (default
-`amd-overhead-results`), `ROCR_VISIBLE_DEVICES`.
+`amd-overhead-results`), `TABLE_FILE` (default `table.md`),
+`ROCR_VISIBLE_DEVICES`.
 
 ## 3. Output
 
