@@ -37,6 +37,9 @@ PYBIN="$(dirname "$(command -v python3)")"
 # ---- with a same-seed baseline run automatically. ----------------------------
 for mode in eager cudagraph; do
   [ "$mode" = "cudagraph" ] && graph_flag="--cudagraph" || graph_flag="--no-cudagraph"
+  # The harness exits nonzero when any case failed; results for the
+  # remaining cases are still written, so keep going and let the table
+  # omit the failed rows.
   python3 benchmarks/overheads/benchmark_serving_profiler.py \
     --model "$MODEL" \
     --length-pairs "$LENGTH_PAIR" \
@@ -51,7 +54,8 @@ for mode in eager cudagraph; do
     --repeats "$REPEATS" \
     "$graph_flag" \
     --server-shutdown-timeout 300 \
-    --output-dir "$OUTPUT_ROOT/$mode"
+    --output-dir "$OUTPUT_ROOT/$mode" || \
+    echo "WARNING: $mode reported failed cases; see $OUTPUT_ROOT/$mode/results.json" >&2
 done
 
 # ---- Generate the combined markdown table ------------------------------------
