@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profilers",
         nargs="+",
-        choices=("proton", "torch", "nsys"),
+        choices=("proton", "torch", "nsys", "rocprof"),
         default=("proton", "torch", "nsys"),
     )
     parser.add_argument("--num-prompts", type=int, default=2048)
@@ -172,6 +172,22 @@ def build_parser() -> argparse.ArgumentParser:
         default="cuda,nvtx,osrt",
         help="Comma-separated Nsight Systems trace domains.",
     )
+    parser.add_argument("--rocprof-path", default="rocprofv3")
+    parser.add_argument(
+        "--rocprof-trace",
+        choices=("runtime", "sys", "kernel"),
+        default="runtime",
+        help=(
+            "rocprofv3 trace aggregate. 'runtime' collects HIP runtime, "
+            "marker, kernel, and memory operations; 'sys' adds HSA API "
+            "tracing; 'kernel' collects kernel dispatches only."
+        ),
+    )
+    parser.add_argument(
+        "--rocprof-output-format",
+        choices=("rocpd", "csv", "json", "pftrace", "otf2"),
+        default="rocpd",
+    )
     return parser
 
 
@@ -272,6 +288,7 @@ def expected_profiler_label(args: argparse.Namespace, profiler: str) -> str:
         "proton": "proton:auto:shadow:tree",
         "torch": torch_label,
         "nsys": f"nsys:{args.nsys_cuda_graph_trace}",
+        "rocprof": f"rocprof:{args.rocprof_trace}",
     }[profiler]
 
 
@@ -337,6 +354,12 @@ def build_command(
         args.nsys_cuda_graph_trace,
         "--nsys-trace",
         args.nsys_trace,
+        "--rocprof-path",
+        args.rocprof_path,
+        "--rocprof-trace",
+        args.rocprof_trace,
+        "--rocprof-output-format",
+        args.rocprof_output_format,
         "--all2all-backend",
         args.all2all_backend,
         "--profile-save-timeout",
@@ -512,6 +535,9 @@ def plot_results(root: Path, rows: list[dict[str, Any]]) -> None:
         "torch:custom",
         "nsys:graph",
         "nsys:node",
+        "rocprof:runtime",
+        "rocprof:sys",
+        "rocprof:kernel",
     ]
     for workload in WORKLOADS:
         for graph_mode in ("cudagraph", "eager"):
@@ -567,7 +593,12 @@ def plot_results(root: Path, rows: list[dict[str, Any]]) -> None:
 
 def environment_metadata(args: argparse.Namespace) -> dict[str, Any]:
     def output(command: list[str]) -> str:
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        try:
+            completed = subprocess.run(
+                command, text=True, capture_output=True, check=False
+            )
+        except FileNotFoundError:
+            return ""
         return (completed.stdout or completed.stderr).strip()
 
     return {
@@ -576,7 +607,9 @@ def environment_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark_revision": os.environ.get("VLLM_BENCHMARK_REVISION")
         or output(["git", "rev-parse", "HEAD"]),
         "nvidia_smi": output(["nvidia-smi", "-L"]),
+        "amd_smi": output(["amd-smi", "list", "--csv"]),
         "nsys_version": output([args.nsys_path, "--version"]),
+        "rocprof_version": output([args.rocprof_path, "--version"]),
         "python_packages": output(
             [
                 args.python,

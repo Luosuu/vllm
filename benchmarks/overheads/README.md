@@ -1,9 +1,9 @@
 # Profiler overhead benchmarks
 
-These scripts measure the serving overhead of the Proton, PyTorch, and Nsight
-Systems profilers with metrics reported by `vllm bench serve`. They support
-tensor parallelism (TP), data parallelism (DP), expert parallelism (EP), eager
-execution, and CUDA graphs.
+These scripts measure the serving overhead of the Proton, PyTorch, Nsight
+Systems, and rocprofv3 profilers with metrics reported by `vllm bench serve`.
+They support tensor parallelism (TP), data parallelism (DP), expert
+parallelism (EP), eager execution, and CUDA graphs.
 
 The benchmark matrix uses dummy model weights by default. It downloads only
 model configuration and tokenizer files, so it can exercise the real model
@@ -28,9 +28,10 @@ Run all commands from the repository root.
 
 ## Requirements
 
-- Linux with NVIDIA GPUs.
+- Linux with NVIDIA GPUs, or AMD GPUs with ROCm (see the AMD notes below).
 - `uv` available on `PATH`.
-- Nsight Systems CLI (`nsys`) available on `PATH`.
+- Nsight Systems CLI (`nsys`) on `PATH` (NVIDIA), or `rocprofv3` on `PATH`
+  (AMD, part of ROCm).
 - A Triton build that provides `triton.profiler` (Proton).
 - Hugging Face access to the selected model repositories. Llama models may
   require accepting the license and authenticating with `hf auth login`.
@@ -232,6 +233,45 @@ The harness follows an explicit session lifecycle:
 The default trace domains are `cuda,nvtx,osrt`, with CUDA graph granularity
 `node`, matching the detailed vLLM profiling setup. Use
 `--nsys-cuda-graph-trace graph` to reduce trace volume.
+
+### rocprofv3 (AMD)
+
+`--profilers rocprof` wraps the server with `rocprofv3 -- vllm serve ...`,
+the AMD counterpart of the Nsight Systems baseline. Unlike `nsys`, rocprofv3
+has no external start/stop session control, so collection also covers server
+startup and warmup. The benchmark metrics window is unaffected because
+collection is active throughout it; trace-save time is measured during
+server shutdown, when rocprofv3 finalizes its output.
+
+The harness passes `--disable-signal-handlers true` because rocprofv3's
+signal handler chains back into vLLM's SIGINT handling and recurses, hanging
+shutdown. As a consequence, traces are finalized only by processes that exit
+gracefully: vLLM force-kills the engine-core process during shutdown, so its
+trace is usually lost even though its collection overhead is fully measured.
+Overhead results are unaffected; use Proton or the PyTorch profiler when the
+retained trace content matters on AMD.
+
+Options:
+
+```text
+--rocprof-path             rocprofv3 binary (default rocprofv3)
+--rocprof-trace            runtime (default), sys, or kernel
+--rocprof-output-format    rocpd (default), csv, json, pftrace, otf2
+```
+
+`runtime` collects HIP runtime API, marker (ROCTx), kernel dispatch, and
+memory operations, the closest match to the default Nsight domains. `sys`
+adds HSA API tracing. `kernel` collects kernel dispatches only. Each traced
+process writes rank-distinguishing `profile_<pid>` output files.
+
+## AMD notes
+
+- Select `--profilers proton torch rocprof`; `nsys` is NVIDIA-only.
+- Export a non-empty `ROCR_VISIBLE_DEVICES` before running: Proton on AMD
+  requires it and rejects `HIP_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES`.
+- The Proton `rocprofiler` backend and `periodic_flushing` mode require
+  Triton >= 3.8; older Triton builds can still use the default `auto`
+  backend.
 
 ## Save timeout and trace retention
 

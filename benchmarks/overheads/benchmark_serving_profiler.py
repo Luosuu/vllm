@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profilers",
         nargs="+",
-        choices=("proton", "torch", "nsys"),
+        choices=("proton", "torch", "nsys", "rocprof"),
         default=("proton", "torch", "nsys"),
     )
     parser.add_argument("--num-prompts", "--batch-size", type=int, default=2048)
@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--nsys-cuda-graph-trace", choices=("graph", "node"), default="node"
     )
+    parser.add_argument("--rocprof-path", default="rocprofv3")
+    parser.add_argument(
+        "--rocprof-trace", choices=("runtime", "sys", "kernel"), default="runtime"
+    )
+    parser.add_argument(
+        "--rocprof-output-format",
+        choices=("rocpd", "csv", "json", "pftrace", "otf2"),
+        default="rocpd",
+    )
 
     parser.add_argument("--load-format", default="dummy")
     parser.add_argument("--dtype", default="auto")
@@ -112,6 +121,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all2all-backend", default="allgather_reducescatter")
     parser.add_argument("--max-num-seqs", type=int, required=True)
     parser.add_argument("--max-num-batched-tokens", type=int, required=True)
+    parser.add_argument(
+        "--max-model-len-margin",
+        type=int,
+        default=32,
+        help=(
+            "Extra tokens on top of input+output for --max-model-len. The "
+            "random dataset's decode/re-tokenize roundtrip can lengthen a "
+            "prompt by a token or two; with zero margin such prompts are "
+            "rejected with HTTP 400 for every seed that produces one."
+        ),
+    )
     add_bool_argument(parser, "--enable-chunked-prefill", True)
     add_bool_argument(parser, "--cudagraph", True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
@@ -158,6 +178,13 @@ def profiler_cases(args: argparse.Namespace) -> list[dict[str, str]]:
             )
         elif profiler == "torch":
             cases.append({"profiler": "torch", "label": torch_label(args)})
+        elif profiler == "rocprof":
+            cases.append(
+                {
+                    "profiler": "rocprof",
+                    "label": f"rocprof:{args.rocprof_trace}",
+                }
+            )
         else:
             cases.append(
                 {
@@ -172,7 +199,7 @@ def profiler_config(
     args: argparse.Namespace, case: dict[str, str], profile_dir: Path
 ) -> dict[str, Any] | None:
     profiler = case["profiler"]
-    if profiler in ("none", "nsys"):
+    if profiler in ("none", "nsys", "rocprof"):
         return None
     if profiler == "torch":
         return {
@@ -291,6 +318,34 @@ def server_command(
             f"--trace={args.nsys_trace}",
             f"--cuda-graph-trace={args.nsys_cuda_graph_trace}",
             "--wait=all",
+            *command,
+        ]
+    if case["profiler"] == "rocprof":
+        # rocprofv3 has no external start/stop session control, so collection
+        # covers server startup and warmup in addition to the benchmark. The
+        # benchmark metrics window is unaffected because collection is active
+        # throughout it. Traces finalize when the server process tree exits.
+        trace_flags = {
+            "runtime": "--runtime-trace",
+            "sys": "--sys-trace",
+            "kernel": "--kernel-trace",
+        }
+        command = [
+            args.rocprof_path,
+            trace_flags[args.rocprof_trace],
+            "--output-format",
+            args.rocprof_output_format,
+            # vLLM installs its own SIGINT handling for graceful shutdown;
+            # rocprofv3's signal handler chains back into it and recurses,
+            # hanging the server. Let the application handle signals and
+            # finalize traces on normal process exit instead.
+            "--disable-signal-handlers",
+            "true",
+            "-d",
+            str(profile_dir),
+            "-o",
+            "profile_%pid%",
+            "--",
             *command,
         ]
     return command
@@ -481,14 +536,19 @@ def run_once(
         f"vllm_{os.getpid()}_{port}_{repeat}" if case["profiler"] == "nsys" else None
     )
     command = server_command(
-        args, case, profile_dir, port, input_len + output_len, nsys_session
+        args,
+        case,
+        profile_dir,
+        port,
+        input_len + output_len + args.max_model_len_margin,
+        nsys_session
     )
     python_bin = str(Path(sys.executable).parent)
     env = os.environ | {
         "PATH": python_bin + os.pathsep + os.environ.get("PATH", ""),
         "VLLM_ALL2ALL_BACKEND": args.all2all_backend,
     }
-    if case["profiler"] == "nsys":
+    if case["profiler"] in ("nsys", "rocprof"):
         env |= {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
     temp_context = (
         tempfile.TemporaryDirectory(prefix="vllm-profile-")
@@ -680,12 +740,16 @@ def run_once(
             raise ProfileSaveTimeout(
                 f"profile save exceeded {shutdown_timeout:g} seconds during shutdown"
             )
+        if case["profiler"] == "rocprof" and profile_save_error is None:
+            # rocprofv3 saves traces while the wrapped server exits, so the
+            # shutdown wait is the trace-save wait.
+            profile_save_s = shutdown_s
     profile_bytes = directory_size(profile_dir)
     if case["profiler"] != "none" and not profile_finalize_skipped:
         server_output = server_log_path.read_text()
         if (
             profile_save_error is None
-            and case["profiler"] != "nsys"
+            and case["profiler"] not in ("nsys", "rocprof")
             and not all(
                 message in server_output
                 for message in ("Profiler started.", "Profiler stopped.")
