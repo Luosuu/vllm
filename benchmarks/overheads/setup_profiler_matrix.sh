@@ -16,8 +16,9 @@ command -v uv >/dev/null || {
   echo "uv is required: https://docs.astral.sh/uv/" >&2
   exit 1
 }
-command -v nsys >/dev/null || {
-  echo "nsys is required; install the nsight-systems-cli package." >&2
+command -v nsys >/dev/null || command -v rocprofv3 >/dev/null || {
+  echo "a system profiler is required: install nsight-systems-cli (NVIDIA)" \
+    "or rocprofiler-sdk for rocprofv3 (AMD)." >&2
   exit 1
 }
 
@@ -64,7 +65,12 @@ print(
     f"Triton {triton.__version__}; {current_platform}"
 )
 '
-nsys --version
+if command -v nsys >/dev/null; then
+  nsys --version
+fi
+if command -v rocprofv3 >/dev/null; then
+  rocprofv3 --version
+fi
 
 "$VENV/bin/python" -c '
 from huggingface_hub import snapshot_download
