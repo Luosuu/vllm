@@ -120,6 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all2all-backend", default="allgather_reducescatter")
     parser.add_argument("--max-num-seqs", type=int, required=True)
     parser.add_argument("--max-num-batched-tokens", type=int, required=True)
+    parser.add_argument(
+        "--max-model-len-margin",
+        type=int,
+        default=32,
+        help=(
+            "Extra tokens on top of input+output for --max-model-len. The "
+            "random dataset's decode/re-tokenize roundtrip can lengthen a "
+            "prompt by a token or two; with zero margin such prompts are "
+            "rejected with HTTP 400 for every seed that produces one."
+        ),
+    )
     add_bool_argument(parser, "--enable-chunked-prefill", True)
     add_bool_argument(parser, "--cudagraph", True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
@@ -523,7 +534,12 @@ def run_once(
         f"vllm_{os.getpid()}_{port}_{repeat}" if case["profiler"] == "nsys" else None
     )
     command = server_command(
-        args, case, profile_dir, port, input_len + output_len, nsys_session
+        args,
+        case,
+        profile_dir,
+        port,
+        input_len + output_len + args.max_model_len_margin,
+        nsys_session
     )
     python_bin = str(Path(sys.executable).parent)
     env = os.environ | {
