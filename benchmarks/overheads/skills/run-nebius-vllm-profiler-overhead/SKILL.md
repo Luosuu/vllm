@@ -75,9 +75,11 @@ Choose persistence deliberately:
 - Use `--storage-mode filesystem` when the matrix must run directly on a POSIX
   shared filesystem or retain very large finalized traces.
 
-Results live below `<volume-source>/<job-name>/`. Never claim completion from
-the cloud Job state alone; validate `job_status.json`, case counts, and failure
-records in persistent storage.
+For Object Storage, results live below `<volume-source>/<aijob-id>/`. The
+submitter prints the unique result prefix plus monitor and download commands
+before following logs. Never claim completion from the cloud Job state alone;
+validate `job_status.json`, case counts, and failure records in persistent
+storage.
 
 ## Submit in stages
 
@@ -125,9 +127,17 @@ shape unless the user requests another experiment:
 ```
 
 Keep submission flags before `--` and matrix-runner flags after it. Use
-`--detach` for asynchronous Jobs and preserve the printed Job ID and job name.
+`--detach` for asynchronous Jobs and preserve the printed Job ID, result
+prefix, and commands.
 
 ## Monitor without disturbing the run
+
+For Object Storage, start with the exact command printed by the submitter:
+
+```bash
+watch -n 30 \
+  benchmarks/overheads/nebius/download_results.sh --list "$JOB_ID"
+```
 
 Use compact read-only snapshots:
 
@@ -157,11 +167,12 @@ unproductive and cancellation is within the granted scope.
 After completion or interruption, inspect persistent artifacts:
 
 ```bash
-jq . '<results>/<job-name>/job_status.json'
-find '<results>/<job-name>' -name case.json -type f | wc -l
-find '<results>/<job-name>' -name case.json -type f -print0 \
+benchmarks/overheads/nebius/download_results.sh "$JOB_ID"
+jq . "results/$JOB_ID/job_status.json"
+find "results/$JOB_ID" -name case.json -type f | wc -l
+find "results/$JOB_ID" -name case.json -type f -print0 \
   | xargs -0 jq -r '.succeeded' | sort | uniq -c
-find '<results>/<job-name>' -name failures.csv -type f -size +0c -print
+find "results/$JOB_ID" -name failures.csv -type f -size +0c -print
 ```
 
 Check each graph-mode directory for `environment.json`, `results.csv`, plots,
