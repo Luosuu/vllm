@@ -31,7 +31,8 @@ install_bootstrap_dependencies() {
     apt-get install -y --no-install-recommends "${packages[@]}"
     rm -rf /var/lib/apt/lists/*
   fi
-  uv pip install --system huggingface_hub matplotlib ninja
+  uv pip install --system \
+    huggingface_hub llnl-hatchet matplotlib ninja pandas regex
 }
 
 install_bootstrap_dependencies
