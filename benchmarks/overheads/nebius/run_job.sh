@@ -19,7 +19,7 @@ STORAGE_MODE=${VLLM_STORAGE_MODE:-object}
 GRAPH_MODES=${VLLM_GRAPH_MODES:-cudagraph}
 SYNC_INTERVAL=${VLLM_SYNC_INTERVAL:-300}
 EXPECTED_GPUS=${VLLM_EXPECTED_GPUS:-8}
-PERSIST_DIR=$RESULTS_MOUNT/$JOB_NAME
+JOB_ID_MARKER=${VLLM_JOB_ID_MARKER:-}
 SYNC_PID=
 
 install_bootstrap_dependencies() {
@@ -37,10 +37,28 @@ install_bootstrap_dependencies() {
 
 install_bootstrap_dependencies
 
+RESULT_ID=$JOB_NAME
+if [[ $STORAGE_MODE == object && -n $JOB_ID_MARKER ]]; then
+  marker_path=$RESULTS_MOUNT/$JOB_ID_MARKER
+  for _ in {1..60}; do
+    if [[ -s $marker_path ]]; then
+      RESULT_ID=$(tr -d '\r\n' <"$marker_path")
+      break
+    fi
+    sleep 5
+  done
+  [[ $RESULT_ID =~ ^aijob-[a-z0-9]+$ ]] || {
+    echo "timed out waiting for a valid Nebius Job ID marker" >&2
+    exit 1
+  }
+fi
+export VLLM_NEBIUS_JOB_ID=$RESULT_ID
+PERSIST_DIR=$RESULTS_MOUNT/$RESULT_ID
+
 if [[ $STORAGE_MODE == filesystem ]]; then
   WORK_DIR=$PERSIST_DIR
 elif [[ $STORAGE_MODE == object ]]; then
-  WORK_DIR=${VLLM_LOCAL_WORK_DIR:-/workspace/vllm-profile-results/$JOB_NAME}
+  WORK_DIR=${VLLM_LOCAL_WORK_DIR:-/workspace/vllm-profile-results/$RESULT_ID}
 else
   echo "VLLM_STORAGE_MODE must be filesystem or object" >&2
   exit 2
@@ -85,6 +103,7 @@ from pathlib import Path
 path = Path(sys.argv[1])
 path.write_text(json.dumps({
     "job_name": os.environ.get("VLLM_JOB_NAME"),
+    "nebius_job_id": os.environ.get("VLLM_NEBIUS_JOB_ID"),
     "status": sys.argv[2],
     "exit_code": int(sys.argv[3]),
     "updated_at": datetime.now(timezone.utc).isoformat(),

@@ -132,24 +132,32 @@ another platform or preset.
 
 Add `--dry-run` to print the exact `nebius ai job create` command without
 creating cloud resources. Add `--detach` to return after submission; otherwise
-the wrapper follows logs and then prints the final Job state. The designated
-reviewer workflow uses one Job; `--preflight-only` remains available for
-maintainer troubleshooting.
+the wrapper follows logs and then prints the final Job state. Immediately after
+creation, before following logs, the wrapper prints the Job ID, result prefix,
+artifact-monitor command, and download command. The designated reviewer
+workflow uses one Job; `--preflight-only` remains available for maintainer
+troubleshooting.
 
-Results are stored below `<mounted-volume>/<job-name>/`. The directory contains
-one subdirectory per graph mode plus `job_status.json`. Matrix outputs retain
-their existing layout, including `results.csv`, `failures.csv`, plots, per-case
-JSON, and any profiles selected by `--profile-retention`. Each retained Proton
-run also contains `profile-summary.md`; the Job prints these summaries to its
-log before synchronizing the final output.
+For Object Storage, results are stored below
+`<mounted-volume>/<Nebius-Job-ID>/`.  The submitter records the newly allocated
+`aijob-*` ID in a unique handoff marker; the Job reads it before creating its
+output directory. Concurrent submissions therefore never share a result
+prefix. The directory contains one subdirectory per graph mode plus
+`job_status.json`. Matrix outputs retain their existing layout, including
+`results.csv`, `failures.csv`, plots, per-case JSON, and any profiles selected
+by `--profile-retention`. Each retained Proton run also contains
+`profile-summary.md`; the Job prints these summaries to its log before
+synchronizing the final output.
 
-On the prepared access host, download the complete output for the Job name
-printed by `submit_job.sh`:
+The printed monitor command refreshes the recursive object listing every
+30 seconds, so a reviewer can see completed cases and retained profiles arrive
+while the Job is still running. On the prepared access host, download the
+complete output using the Job ID printed by `submit_job.sh`:
 
 ```bash
 source ~/.config/llmprof-ae.env
-benchmarks/overheads/nebius/download_results.sh <job-name>
+benchmarks/overheads/nebius/download_results.sh <aijob-id>
 ```
 
-This synchronizes `s3://$NEBIUS_BUCKET_NAME/<job-name>/` to
-`results/<job-name>/`.  The command prints `job_status.json` when present.
+This synchronizes `s3://$NEBIUS_BUCKET_NAME/<aijob-id>/` to
+`results/<aijob-id>/`.  The command prints `job_status.json` when present.

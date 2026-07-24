@@ -61,7 +61,7 @@ preset=${NEBIUS_PRESET:-8gpu-128vcpu-1600gb}
 disk_size=${NEBIUS_DISK_SIZE:-1Ti}
 shm_size=${NEBIUS_SHM_SIZE:-64Gi}
 job_timeout=${NEBIUS_JOB_TIMEOUT:-24h}
-job_name=${NEBIUS_JOB_NAME:-vllm-profile-$(date -u +%Y%m%d-%H%M%S)}
+job_name=${NEBIUS_JOB_NAME:-vllm-profile-$(date -u +%Y%m%d-%H%M%S)-$(printf '%04x%04x' "$RANDOM" "$RANDOM")}
 graph_modes=${NEBIUS_GRAPH_MODES:-cudagraph}
 sync_interval=${NEBIUS_SYNC_INTERVAL:-300}
 repo_url=${NEBIUS_VLLM_REPO_URL:-https://github.com/Luosuu/vllm.git}
@@ -137,6 +137,12 @@ command -v jq >/dev/null || {
   echo "--storage-mode must be filesystem or object" >&2
   exit 2
 }
+if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
+  command -v aws >/dev/null || {
+    echo "aws CLI is required to initialize the per-Job result prefix" >&2
+    exit 1
+  }
+fi
 [[ $sync_interval =~ ^[0-9]+$ ]] || {
   echo "--sync-interval must be a non-negative integer" >&2
   exit 2
@@ -196,6 +202,10 @@ if ((${#benchmark_args[@]})); then
 fi
 results_mount=/mnt/vllm-profile-results
 volume_spec="${volume_source}:${results_mount}:rw"
+job_id_marker=
+if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
+  job_id_marker=".llmprof-submissions/${job_name}/job-id"
+fi
 if [[ -n $volume_profile ]]; then
   volume_spec+=":${volume_profile}"
 fi
@@ -224,6 +234,7 @@ create=(
   --env "VLLM_STORAGE_MODE=${storage_mode}"
   --env "VLLM_RESULTS_MOUNT=${results_mount}"
   --env "VLLM_JOB_NAME=${job_name}"
+  --env "VLLM_JOB_ID_MARKER=${job_id_marker}"
   --env "VLLM_SYNC_INTERVAL=${sync_interval}"
   --env "VLLM_EXPECTED_GPUS=8"
   --env "VLLM_JOB_PREFLIGHT_ONLY=${preflight_only}"
@@ -246,16 +257,28 @@ fi
 response=$("${create[@]}")
 job_id=$(jq -er '.metadata.id' <<<"$response")
 printf 'Submitted Nebius Job %s (%s)\n' "$job_name" "$job_id"
-printf 'Results: %s/%s\n' "$volume_source" "$job_name"
 printf 'Status:  nebius ai job get %q\n' "$job_id"
 printf 'Logs:    nebius ai job logs %q --follow\n' "$job_id"
+
+result_id=$job_name
+if [[ -n $job_id_marker ]]; then
+  s3_region=${NEBIUS_REGION:-eu-north1}
+  s3_endpoint=${NEBIUS_S3_ENDPOINT:-https://storage.${s3_region}.nebius.cloud}
+  printf '%s\n' "$job_id" |
+    aws --endpoint-url "$s3_endpoint" --region "$s3_region" s3 cp - \
+      "s3://${NEBIUS_BUCKET_NAME}/${job_id_marker}" --only-show-errors
+  result_id=$job_id
+fi
+
+printf 'Results: %s/%s\n' "$volume_source" "$result_id"
+if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
+  printf 'Monitor: watch -n 30 %q --list %q\n' \
+    "$SCRIPT_DIR/download_results.sh" "$result_id"
+  printf 'Download: %q %q\n' \
+    "$SCRIPT_DIR/download_results.sh" "$result_id"
+fi
 
 if [[ $detach == 0 ]]; then
   "${nebius_cmd[@]}" ai job logs "$job_id" --follow --timestamps
   "${nebius_cmd[@]}" ai job get "$job_id"
-fi
-
-if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
-  printf 'Download: %q %q\n' \
-    "$SCRIPT_DIR/download_results.sh" "$job_name"
 fi
