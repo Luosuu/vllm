@@ -74,10 +74,25 @@ case "$NEBIUS_VOLUME_SOURCE" in
   storagebucket-*)
     [[ ${NEBIUS_STORAGE_MODE:-object} == object ]] ||
       fail "a storage bucket requires NEBIUS_STORAGE_MODE=object"
-    "${nebius_cmd[@]}" storage bucket \
-      get "$NEBIUS_VOLUME_SOURCE" --format json |
-      jq -e '.status.state == "ACTIVE"' >/dev/null ||
+    command -v aws >/dev/null || fail "aws is required on PATH"
+    [[ -n ${NEBIUS_BUCKET_NAME:-} ]] ||
+      fail "NEBIUS_BUCKET_NAME is missing from $ENV_FILE"
+    [[ -n ${NEBIUS_REGION:-} ]] ||
+      fail "NEBIUS_REGION is missing from $ENV_FILE"
+    bucket_json=$("${nebius_cmd[@]}" storage bucket \
+      get "$NEBIUS_VOLUME_SOURCE" --format json)
+    jq -e '.status.state == "ACTIVE"' <<<"$bucket_json" >/dev/null ||
       fail "storage bucket is not readable and ACTIVE"
+    [[ $(jq -r '.metadata.name' <<<"$bucket_json") == \
+      "$NEBIUS_BUCKET_NAME" ]] ||
+      fail "NEBIUS_BUCKET_NAME does not match NEBIUS_VOLUME_SOURCE"
+    [[ $(jq -r '.status.region' <<<"$bucket_json") == "$NEBIUS_REGION" ]] ||
+      fail "NEBIUS_REGION does not match the storage bucket"
+    s3_endpoint=${NEBIUS_S3_ENDPOINT:-https://storage.${NEBIUS_REGION}.nebius.cloud}
+    aws --endpoint-url "$s3_endpoint" --region "$NEBIUS_REGION" \
+      s3api list-objects-v2 --bucket "$NEBIUS_BUCKET_NAME" \
+      --max-keys 1 >/dev/null ||
+      fail "AWS CLI cannot read the Object Storage bucket"
     ;;
   computefilesystem-*)
     [[ ${NEBIUS_STORAGE_MODE:-filesystem} == filesystem ]] ||
