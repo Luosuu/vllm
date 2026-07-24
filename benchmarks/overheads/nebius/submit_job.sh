@@ -254,3 +254,8 @@ if [[ $detach == 0 ]]; then
   "${nebius_cmd[@]}" ai job logs "$job_id" --follow --timestamps
   "${nebius_cmd[@]}" ai job get "$job_id"
 fi
+
+if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
+  printf 'Download: %q %q\n' \
+    "$SCRIPT_DIR/download_results.sh" "$job_name"
+fi

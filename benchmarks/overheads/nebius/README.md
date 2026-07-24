@@ -49,8 +49,14 @@ Artifact maintainers complete this section before giving the reviewer SSH
 access.  The reviewer does not configure Nebius credentials or cloud
 resources.  Attach a dedicated least-privilege service account to the VM so
 the preinstalled Nebius CLI uses the VM instance identity.  Do not store a
-service-account private key in the artifact, environment file, or reviewer
-home directory.
+service-account private key in the artifact or environment file.
+
+VM instance identity authenticates the Nebius CLI, but AWS-compatible Object
+Storage clients require an S3 access key.  Before handoff, the maintainer
+installs AWS CLI and configures a time-limited access key for the service
+account on the access host.  Set `NEBIUS_BUCKET_NAME` and `NEBIUS_REGION` in
+`~/.config/llmprof-ae.env`.  The key must expire after the evaluation and must
+not be committed or copied into the artifact.
 
 The Job needs a shared filesystem, bucket ID/name, or `s3://bucket` mounted
 read-write.  Copy `reviewer.env.example` to
@@ -136,3 +142,14 @@ their existing layout, including `results.csv`, `failures.csv`, plots, per-case
 JSON, and any profiles selected by `--profile-retention`. Each retained Proton
 run also contains `profile-summary.md`; the Job prints these summaries to its
 log before synchronizing the final output.
+
+On the prepared access host, download the complete output for the Job name
+printed by `submit_job.sh`:
+
+```bash
+source ~/.config/llmprof-ae.env
+benchmarks/overheads/nebius/download_results.sh <job-name>
+```
+
+This synchronizes `s3://$NEBIUS_BUCKET_NAME/<job-name>/` to
+`results/<job-name>/`.  The command prints `job_status.json` when present.
