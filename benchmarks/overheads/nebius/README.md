@@ -43,10 +43,29 @@ the PR targets another upstream repository.
 Use an immutable image digest for submitted runs. A registry in the same
 Nebius project does not require credentials in the Job configuration.
 
-## Configure the CLI and storage
+## Prepare the access host
 
-Create a Nebius CLI profile and select a project before submission. The Job
-needs a shared filesystem, bucket ID/name, or `s3://bucket` mounted read-write.
+Artifact maintainers complete this section before giving the reviewer SSH
+access.  The reviewer does not configure Nebius credentials or cloud
+resources.  Attach a dedicated least-privilege service account to the VM so
+the preinstalled Nebius CLI uses the VM instance identity.  Do not store a
+service-account private key in the artifact, environment file, or reviewer
+home directory.
+
+The Job needs a shared filesystem, bucket ID/name, or `s3://bucket` mounted
+read-write.  Copy `reviewer.env.example` to
+`~/.config/llmprof-ae.env`, replace every placeholder with an immutable value,
+and run the readiness check before handoff:
+
+```bash
+benchmarks/overheads/nebius/check_readiness.sh
+```
+
+The check verifies the pinned commit and image, CLI features, profile/project,
+subnet, persistent storage, and exact submission command.  It ends with
+`--dry-run` and creates no Job.  The maintainer should also submit one
+`--preflight-only` Job before handoff to validate Job creation, GPU quota, and
+the runtime image.
 
 Use `--storage-mode filesystem` for a POSIX shared filesystem. The matrix runs
 directly in the mounted path and is resumable across Jobs. Use
@@ -60,9 +79,14 @@ trace. Object Storage is a good default with `--no-finalize-non-proton` and
 while only the finalized Proton traces need the final bulk copy.
 
 For gated Hugging Face repositories, use a MysteryBox secret with a recent CLI
-that supports `--env-secret`; do not put an HF token in `--env`.
+that supports `--env-secret`; do not put an HF token in `--env` or in a saved
+Job specification.
 
-## Submit
+## Reviewer submission
+
+After the maintainer installs the supplied SSH public key, the reviewer logs
+in to the prepared host, loads `~/.config/llmprof-ae.env`, and directly uses
+the wrapper below.  No Nebius login or credential setup is required.
 
 ```bash
 benchmarks/overheads/nebius/submit_job.sh \

@@ -192,7 +192,7 @@ fi
 
 benchmark_args_b64=
 if ((${#benchmark_args[@]})); then
-  benchmark_args_b64=$(printf '%s\0' "${benchmark_args[@]}" | base64 -w0)
+  benchmark_args_b64=$(printf '%s\0' "${benchmark_args[@]}" | base64 | tr -d '\n')
 fi
 results_mount=/mnt/vllm-profile-results
 volume_spec="${volume_source}:${results_mount}:rw"

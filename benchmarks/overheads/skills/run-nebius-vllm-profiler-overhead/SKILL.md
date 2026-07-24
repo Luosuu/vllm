@@ -46,19 +46,26 @@ that the recorded per-engine `max_num_seqs` is the local capacity (for example,
 
 ## Validate Nebius access and persistence
 
-Run read-only checks first:
+Before reviewer handoff, the artifact maintainer runs these checks on the
+prepared access host:
 
 ```bash
 command -v nebius
 nebius version
-nebius config list
-nebius config get parent-id
 nebius ai job create --help
+benchmarks/overheads/nebius/check_readiness.sh
 ```
 
 Confirm that the CLI exposes `--inject-file`, `--args`, and any requested secret
 or preemptible flags. Confirm the project, subnet, GPU platform/preset, and
-writable storage source before submission.
+writable storage source before submission. Do not print a full CLI profile:
+it can contain private-key material or credential paths. The readiness script
+queries only non-secret fields and ends with a submission dry run.
+
+The reviewer should not configure Nebius authentication.  The access-host VM
+uses an attached least-privilege service account as its instance identity.
+After SSH access is installed, reviewers load the prepared environment and
+directly run the documented AE submissions.
 
 Choose persistence deliberately:
 

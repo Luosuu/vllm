@@ -20,6 +20,8 @@ architecture and kernels without downloading full checkpoints.
 - `setup_profiler_matrix.sh` creates a virtual environment, installs vLLM and
   plotting dependencies, validates Proton and Nsight Systems, and caches the
   required Hugging Face metadata.
+- `nebius/check_readiness.sh` validates a pinned reviewer configuration and
+  renders the exact Nebius submission without creating cloud resources.
 - `skills/run-nebius-vllm-profiler-overhead/` gives an agent a reproducible
   workflow for submitting, monitoring, resuming, and validating the matrix on
   Nebius Serverless AI Jobs.
