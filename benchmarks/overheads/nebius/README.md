@@ -133,4 +133,6 @@ maintainer troubleshooting.
 Results are stored below `<mounted-volume>/<job-name>/`. The directory contains
 one subdirectory per graph mode plus `job_status.json`. Matrix outputs retain
 their existing layout, including `results.csv`, `failures.csv`, plots, per-case
-JSON, and any profiles selected by `--profile-retention`.
+JSON, and any profiles selected by `--profile-retention`. Each retained Proton
+run also contains `profile-summary.md`; the Job prints these summaries to its
+log before synchronizing the final output.

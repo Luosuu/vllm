@@ -101,6 +101,22 @@ path.write_text(json.dumps({
 ' "$WORK_DIR/job_status.json" "$status" "$exit_code"
 }
 
+summarize_retained_proton_profiles() {
+  local summary_script=$OVERHEAD_DIR/skills/analyze-proton-profile/scripts/summarize_profile.py
+  local profile_file profile_dir summary_path
+  local -A seen=()
+
+  while IFS= read -r -d '' profile_file; do
+    profile_dir=$(dirname "$profile_file")
+    [[ -z ${seen[$profile_dir]:-} ]] || continue
+    seen[$profile_dir]=1
+    summary_path=$(dirname "$profile_dir")/profile-summary.md
+    printf 'Proton profile summary: %s\n' "$summary_path"
+    "$PYTHON" "$summary_script" --viewer proton-viewer "$profile_dir" |
+      tee "$summary_path"
+  done < <(find "$WORK_DIR" -type f -name '*.hatchet' -print0)
+}
+
 stop_sync_loop() {
   if [[ -n $SYNC_PID ]]; then
     kill "$SYNC_PID" 2>/dev/null || true
@@ -220,3 +236,6 @@ for graph_mode in "${graph_modes[@]}"; do
     --output-dir "$WORK_DIR/$graph_mode"
   sync_results checkpoint
 done
+
+summarize_retained_proton_profiles
+sync_results checkpoint
