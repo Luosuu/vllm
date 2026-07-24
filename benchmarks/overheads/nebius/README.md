@@ -63,9 +63,8 @@ benchmarks/overheads/nebius/check_readiness.sh
 
 The check verifies the pinned commit and image, CLI features, profile/project,
 subnet, persistent storage, and exact submission command.  It ends with
-`--dry-run` and creates no Job.  The maintainer should also submit one
-`--preflight-only` Job before handoff to validate Job creation, GPU quota, and
-the runtime image.
+`--dry-run` and creates no Job.  This is an author-side handoff check; the
+reviewer directly runs the designated evaluation Job.
 
 Use `--storage-mode filesystem` for a POSIX shared filesystem. The matrix runs
 directly in the mounted path and is resumable across Jobs. Use
@@ -74,9 +73,9 @@ local disk, while every completed case (including retained profiles) is copied
 periodically and all remaining artifacts are copied on exit.
 
 Prefer a shared filesystem when finalizing and retaining every raw Torch/nsys
-trace. Object Storage is a good default with `--no-finalize-non-proton` and
-`--profile-retention all`: the runtime metrics for Torch/nsys are preserved,
-while only the finalized Proton traces need the final bulk copy.
+trace. Object Storage is a good default with `--profile-retention proton`:
+the runtime metrics for Torch/nsys are preserved while only the Proton
+profiles are retained.
 
 For gated Hugging Face repositories, use a MysteryBox secret with a recent CLI
 that supports `--env-secret`; do not put an HF token in `--env` or in a saved
@@ -97,17 +96,22 @@ benchmarks/overheads/nebius/submit_job.sh \
   --repo-url https://github.com/Luosuu/vllm.git \
   --vllm-revision <vllm-pr-commit-sha> \
   --benchmark-revision <benchmark-commit-sha> \
-  --graph-modes "cudagraph eager" \
+  --graph-modes cudagraph \
   -- \
-  --models gpt-oss-20b gpt-oss-120b mixtral-8x7b \
-  --workloads in2000_out500 in1000_out1000 in500_out2000 \
+  --models gpt-oss-20b \
+  --workloads in2000_out500 \
   --tp-sizes 2 \
   --total-gpus 8 \
   --skip-ep-cases \
   --profilers proton torch nsys \
-  --repeats 1 \
-  --no-finalize-non-proton \
-  --profile-retention all
+  --num-prompts 2048 --num-warmups 512 \
+  --max-concurrency 256 \
+  --max-num-seqs 256 \
+  --max-num-batched-tokens 8192 \
+  --repeats 3 \
+  --profile-retention proton \
+  --profile-save-timeout 600 \
+  --min-free-gb 128
 ```
 
 Branch names are accepted when intentionally testing their latest state, but
@@ -122,10 +126,9 @@ another platform or preset.
 
 Add `--dry-run` to print the exact `nebius ai job create` command without
 creating cloud resources. Add `--detach` to return after submission; otherwise
-the wrapper follows logs and then prints the final Job state. Use
-`--preflight-only` for the first cloud submission to validate the image,
-eight-GPU allocation, Proton API, Nsight Systems, and mounted storage without
-starting a benchmark.
+the wrapper follows logs and then prints the final Job state. The designated
+reviewer workflow uses one Job; `--preflight-only` remains available for
+maintainer troubleshooting.
 
 Results are stored below `<mounted-volume>/<job-name>/`. The directory contains
 one subdirectory per graph mode plus `job_status.json`. Matrix outputs retain

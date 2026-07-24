@@ -297,6 +297,7 @@ Save failures also appear in `failures.csv` with
 Raw traces are handled according to `--profile-retention`:
 
 - `none`: delete traces after recording their size (recommended for matrices).
+- `proton`: retain Proton profiles and delete successful Torch/nsys traces.
 - `failed`: retain traces only for failed cases.
 - `all`: retain every trace.
 

@@ -122,9 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("profiler_matrix"))
     parser.add_argument(
         "--profile-retention",
-        choices=("none", "failed", "all"),
+        choices=("none", "proton", "failed", "all"),
         default="none",
-        help="Raw traces to retain after their sizes are recorded.",
+        help=(
+            "Raw traces to retain after their sizes are recorded. 'proton' "
+            "keeps only Proton profiles."
+        ),
     )
     parser.add_argument(
         "--min-free-gb",
@@ -290,6 +293,14 @@ def expected_profiler_label(args: argparse.Namespace, profiler: str) -> str:
         "nsys": f"nsys:{args.nsys_cuda_graph_trace}",
         "rocprof": f"rocprof:{args.rocprof_trace}",
     }[profiler]
+
+
+def retain_profiles(retention: str, profiler: str, succeeded: bool) -> bool:
+    return (
+        retention == "all"
+        or (retention == "proton" and profiler == "proton")
+        or (retention == "failed" and not succeeded)
+    )
 
 
 def case_signature(command: list[str], metadata: dict[str, Any]) -> str:
@@ -710,9 +721,7 @@ def main(args: argparse.Namespace) -> int:
                 "peak_disk_delta_bytes": peak_disk_delta_bytes,
             }
             write_json(output_dir / "case.json", metadata)
-            keep = args.profile_retention == "all" or (
-                args.profile_retention == "failed" and not succeeded
-            )
+            keep = retain_profiles(args.profile_retention, case.profiler, succeeded)
             if not keep:
                 for profile_dir in output_dir.rglob("profiles"):
                     shutil.rmtree(profile_dir)

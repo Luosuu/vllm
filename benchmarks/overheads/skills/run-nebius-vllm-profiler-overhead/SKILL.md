@@ -105,24 +105,23 @@ benchmarks/overheads/nebius/submit_job.sh \
   --repeats 1 --max-cases 1
 ```
 
-Then remove `--dry-run` to execute the preflight. Require evidence for all of
-these before the full matrix: eight visible GPUs, mounted writable storage,
-`nsys --version`, successful source checkout/install, and the required Proton
-API (`start`, `activate`, `deactivate`, and `finalize`).
+Keep the readiness invocation as a dry run during access-host handoff. The
+reviewer directly submits the designated evaluation Job; use a paid preflight
+only while troubleshooting a failed environment.
 
 For the established eight-GPU TP2 runtime-overhead matrix, use this argument
 shape unless the user requests another experiment:
 
 ```text
 --graph-modes cudagraph
---models gpt-oss-20b gpt-oss-120b mixtral-8x7b
---workloads in2000_out500 in1000_out1000 in500_out2000
+--models gpt-oss-20b
+--workloads in2000_out500
 --tp-sizes 2 --total-gpus 8 --skip-ep-cases
 --profilers proton torch nsys
 --num-prompts 2048 --num-warmups 512 --max-concurrency 256
 --max-num-seqs 256 --max-num-batched-tokens 8192
---repeats 1 --no-finalize-non-proton
---profile-save-timeout 600 --profile-retention all
+--repeats 3
+--profile-save-timeout 600 --profile-retention proton
 ```
 
 Keep submission flags before `--` and matrix-runner flags after it. Use
