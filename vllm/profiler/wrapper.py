@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext, suppress
 from typing import Literal
+from uuid import uuid4
 
 import torch
 from packaging.version import InvalidVersion, Version
@@ -136,7 +137,14 @@ class WorkerProfiler(ABC):
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            try:
+                self._call_stop()
+            except Exception:
+                # Automatic stops run in the model-execution path. A profiler
+                # output failure must not fail an otherwise valid inference.
+                logger.exception(
+                    "Failed to stop profiler after reaching max iterations."
+                )
             return
 
     def _profiler_step(self) -> bool:
@@ -377,6 +385,9 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._triton_version = None
         self._validate_capabilities()
         self._session_id: int | None = None
+        # Qualify output names by process and wrapper instance so a new
+        # worker cannot overwrite profiles left by an earlier server process.
+        self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
         self._run_id = 0
         self._capture_session_id: int | None = None
         self._capture_output_path = os.path.join(
@@ -491,7 +502,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
-        output_path = f"{self._output_path}_run{self._run_id}"
+        output_path = f"{self._output_path}_{self._instance_id}_run{self._run_id}"
         self._session_id = self._create_session(output_path)
         self._run_id += 1
 

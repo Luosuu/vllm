@@ -39,7 +39,7 @@ def _run_profile(worker: Any, is_start: bool, profile_prefix: str | None) -> str
     try:
         worker.profile(is_start=is_start, profile_prefix=profile_prefix)
     except Exception as exc:
-        rank = getattr(worker, "global_rank", "unknown")
+        rank = getattr(worker, "global_rank", getattr(worker, "rank", "unknown"))
         logger.exception("Profiling failed on rank %s.", rank)
         return f"rank {rank}: {type(exc).__name__}: {exc}"
     return None

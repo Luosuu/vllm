@@ -106,10 +106,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 Then use `/start_profile` and `/stop_profile` as shown above, or pass
 `--profile` to a vLLM benchmark. Each worker uses a topology- and
 rank-qualified output name, such as
-`proton_dp0_pp0_tp0_dcp0_ep0_rank0_run0.hatchet`, so distributed workers and
-repeated profiling runs do not overwrite one another. A `profile_prefix` is
-included when supplied. Each profile is finalized by `/stop_profile` and is
-ready to inspect immediately.
+`proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
+so distributed workers, restarted servers, and repeated profiling runs do not
+overwrite one another. A `profile_prefix` is included when supplied. Each
+profile is finalized by `/stop_profile` and is ready to inspect immediately.
 
 Backend-specific modes can be selected with `proton_mode`:
 
@@ -163,7 +163,7 @@ Inspect tree profiles with:
 
 ```bash
 proton-viewer -m time/ns \
-    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_run0.hatchet
+    proton_profile/proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet
 ```
 
 Chrome traces (`proton_data: "trace"`) can be opened in

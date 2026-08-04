@@ -5,6 +5,7 @@ import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
+from uuid import UUID
 
 import pytest
 import torch
@@ -121,7 +122,7 @@ class TestProtonProfilerWrapper:
         wrapper.start()
 
         proton.start.assert_called_once_with(
-            name=os.path.join(tmp_path, "proton_rank_3_run0"),
+            name=os.path.join(tmp_path, f"proton_rank_3_{wrapper._instance_id}_run0"),
             context="python",
             data="trace",
             backend="cupti",
@@ -145,10 +146,31 @@ class TestProtonProfilerWrapper:
         wrapper.stop()
 
         assert [c.kwargs["name"] for c in proton.start.call_args_list] == [
-            os.path.join(tmp_path, f"proton_rank_3_run{run}") for run in range(2)
+            os.path.join(
+                tmp_path,
+                f"proton_rank_3_{wrapper._instance_id}_run{run}",
+            )
+            for run in range(2)
         ]
         assert proton.deactivate.call_count == 2
         assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
+
+    def test_output_names_are_unique_across_worker_restarts(self, tmp_path):
+        with patch(
+            "vllm.profiler.wrapper.uuid4",
+            side_effect=[UUID(int=1), UUID(int=2)],
+        ):
+            first, first_proton = make_wrapper(tmp_path)
+            second, second_proton = make_wrapper(tmp_path)
+
+        first.start()
+        second.start()
+
+        first_name = first_proton.start.call_args.kwargs["name"]
+        second_name = second_proton.start.call_args.kwargs["name"]
+        assert first_name != second_name
+        assert first_name.endswith(f"_{UUID(int=1).hex}_run0")
+        assert second_name.endswith(f"_{UUID(int=2).hex}_run0")
 
     @pytest.mark.parametrize(
         ("option", "value", "feature"),
@@ -275,6 +297,21 @@ class TestProtonProfilerWrapper:
         proton.finalize.assert_called_once_with(session=7)
         assert (wrapper._active, wrapper._running, wrapper._session_id) == (
             False,
+            False,
+            None,
+        )
+
+    def test_automatic_stop_errors_do_not_fail_inference(self, tmp_path):
+        proton = make_proton()
+        proton.finalize.side_effect = RuntimeError("write failed")
+        wrapper, _ = make_wrapper(tmp_path, proton, max_iterations=1)
+        wrapper.start()
+
+        wrapper.step()
+        wrapper.step()
+
+        assert (wrapper._active, wrapper._running, wrapper._session_id) == (
+            True,
             False,
             None,
         )

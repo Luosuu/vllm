@@ -71,6 +71,14 @@ def test_profile_reports_stop_failure_without_rollback():
     executor.collective_rpc.assert_called_once_with(_run_profile, args=(False, None))
 
 
+def test_run_profile_falls_back_to_concrete_worker_rank():
+    worker = MagicMock(spec=["profile", "rank"])
+    worker.rank = 2
+    worker.profile.side_effect = RuntimeError("write failed")
+
+    assert _run_profile(worker, False, None) == "rank 2: RuntimeError: write failed"
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
