@@ -11,7 +11,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
-from vllm.config import ProfilerConfig
+from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.profiler.wrapper import ProtonProfilerWrapper
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -188,6 +188,43 @@ class TestProtonProfilerWrapper:
         with pytest.raises(RuntimeError, match="does not support selecting"):
             make_wrapper(tmp_path, proton, proton_output_format="hatchet")
 
+    def test_cuda_graph_capture_prepares_dormant_session(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_wrapper(tmp_path, proton, proton_mode="custom")
+
+        with wrapper.capture_cuda_graphs():
+            assert wrapper._capture_session_id == 7
+
+        assert proton.start.call_args.kwargs["context"] == "shadow"
+        assert proton.start.call_args.kwargs["data"] == "tree"
+        proton.deactivate.assert_called_once_with(session=7)
+
+        wrapper.start()
+        assert wrapper._session_id == 8
+
+    def test_pcsampling_rejects_cuda_graph_capture(self, tmp_path):
+        wrapper, proton = make_wrapper(tmp_path, proton_mode="pcsampling")
+
+        with (
+            pytest.raises(ValueError, match="disable CUDA graphs"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            pass
+
+        proton.start.assert_not_called()
+
+    def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
+        wrapper, proton = make_wrapper(tmp_path)
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            raise RuntimeError("capture failed")
+
+        proton.deactivate.assert_called_once_with(session=7)
+
     @pytest.mark.parametrize("fail_cleanup", [False, True])
     def test_shutdown_finalizes_active_session(self, tmp_path, fail_cleanup):
         proton = make_proton()
@@ -323,3 +360,63 @@ def test_gpu_worker_creates_proton_profiler():
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
     worker.profiler.start.assert_called_once()
+
+
+@pytest.mark.parametrize("runner", ["disabled", "v1", "v2"])
+def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
+    worker = MagicMock()
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
+    )
+    if runner == "v1":
+        worker.use_v2_model_runner = False
+        worker.model_runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+        worker.model_runner.encoder_cudagraph_manager = None
+    elif runner == "v2":
+        worker.use_v2_model_runner = True
+        worker.model_runner.cudagraph_manager.needs_capture.return_value = False
+
+    context = Worker._get_proton_capture_context(worker)
+
+    assert worker.profiler is None
+    if runner == "v1":
+        worker.model_runner._maybe_init_encoder_cudagraph_manager.assert_called_once()
+    with context:
+        pass
+
+
+def test_proton_initializes_before_cuda_graph_capture():
+    class FakeProtonProfiler:
+        def __init__(self, config, worker_name):
+            self.config = config
+            self.worker_name = worker_name
+            self.capture_context = nullcontext()
+
+        def capture_cuda_graphs(self):
+            return self.capture_context
+
+    worker = MagicMock()
+    worker.rank = 2
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    worker.use_v2_model_runner = True
+    worker.model_runner.cudagraph_manager.needs_capture.return_value = True
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank2",
+        ),
+        patch(
+            "vllm.v1.worker.gpu_worker.ProtonProfilerWrapper",
+            FakeProtonProfiler,
+        ),
+    ):
+        context = Worker._get_proton_capture_context(worker)
+
+    assert worker.profiler.config is worker.profiler_config
+    assert worker.profiler.worker_name == "rank2"
+    assert context is worker.profiler.capture_context
