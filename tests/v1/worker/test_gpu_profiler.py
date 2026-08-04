@@ -246,7 +246,7 @@ class TestIsUriPath:
 class TestAnnotateProfile:
     """Tests for Worker.annotate_profile() annotation string formatting."""
 
-    def _annotate(self, detailed: bool) -> str:
+    def _annotate(self, detailed: bool):
         worker = MagicMock()
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
         worker.profiler = MagicMock()
@@ -268,18 +268,37 @@ class TestAnnotateProfile:
         )
 
         Worker.annotate_profile(worker, sched)
-        return worker.profiler.annotate_context_manager.call_args[0][0]
+        return worker.profiler.annotate_context_manager.call_args
 
     def test_simple_format_mixed(self):
-        assert self._annotate(detailed=False) == (
+        assert self._annotate(detailed=False).args[0] == (
             "execute_context_1(4)_generation_1(1)"
         )
 
     def test_detailed_format_mixed(self):
         # ctx1: sq=4, sk=4, sqsq=16, sqsk=16 | gen1: sq=1, sk=11, sqsq=1, sqsk=11 | bs=5
-        assert self._annotate(detailed=True) == (
+        assert self._annotate(detailed=True).args[0] == (
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
+
+    def test_numeric_metrics(self):
+        assert self._annotate(detailed=False).kwargs["metrics"] == {
+            "num_context_requests": 1,
+            "num_context_tokens": 4,
+            "num_generation_requests": 1,
+            "num_generation_tokens": 1,
+        }
+
+    def test_skips_annotations_outside_profile_window(self):
+        worker = MagicMock()
+        worker.profiler.is_running = False
+
+        context = Worker.annotate_profile(worker, MagicMock())
+
+        worker.profiler.step.assert_called_once_with()
+        worker.profiler.annotate_context_manager.assert_not_called()
+        with context:
+            pass
 
 
 def test_profiler_entered_during_capture():

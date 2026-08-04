@@ -302,7 +302,7 @@ class TestProtonProfilerWrapper:
 
         context = wrapper.annotate_context_manager("decode")
 
-        proton.scope.assert_called_once_with("decode")
+        proton.scope.assert_called_once_with("decode", metrics=None)
         assert context is not None
 
 
