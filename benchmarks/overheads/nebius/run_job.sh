@@ -212,6 +212,19 @@ fi
 VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base \
   uv pip install --system --editable "$SOURCE_DIR" --torch-backend=auto
 
+# The base image can contain a newer flashinfer-cubin than the revision under
+# test.  uv resolves flashinfer-python from the checkout but may leave that
+# preinstalled cubin in place, and FlashInfer requires their versions to match.
+flashinfer_cubin_version=$(sed -n 's/^flashinfer-cubin==//p' \
+  "$SOURCE_DIR/requirements/cuda.txt")
+[[ -n $flashinfer_cubin_version ]] || {
+  echo "flashinfer-cubin is not pinned in requirements/cuda.txt" >&2
+  exit 1
+}
+uv pip install --system \
+  --extra-index-url https://flashinfer.ai/whl/ \
+  "flashinfer-cubin==$flashinfer_cubin_version"
+
 "$PYTHON" -c '
 import triton.profiler as proton
 import vllm
