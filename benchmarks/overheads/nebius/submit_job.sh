@@ -255,7 +255,15 @@ if [[ $dry_run == 1 ]]; then
 fi
 
 response=$("${create[@]}")
-job_id=$(jq -er '.metadata.id' <<<"$response")
+# Some nebius CLI versions print operation progress before the requested JSON.
+# Keep the progress visible on failure, but pass only the JSON object to jq.
+response_json=$(sed -n '/^[[:space:]]*{/,$p' <<<"$response")
+if [[ -z $response_json ]]; then
+  echo "nebius ai job create returned no JSON response:" >&2
+  printf '%s\n' "$response" >&2
+  exit 1
+fi
+job_id=$(jq -er '.metadata.id' <<<"$response_json")
 printf 'Submitted Nebius Job %s (%s)\n' "$job_name" "$job_id"
 printf 'Status:  nebius ai job get %q\n' "$job_id"
 printf 'Logs:    nebius ai job logs %q --follow\n' "$job_id"
