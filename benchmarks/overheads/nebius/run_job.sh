@@ -212,9 +212,10 @@ fi
 VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base \
   uv pip install --system --editable "$SOURCE_DIR" --torch-backend=auto
 
-# The base image can contain a newer flashinfer-cubin than the revision under
-# test.  uv resolves flashinfer-python from the checkout but may leave that
-# preinstalled cubin in place, and FlashInfer requires their versions to match.
+# The base image can contain newer FlashInfer binary packages than the revision
+# under test. uv resolves flashinfer-python from the checkout but may leave the
+# preinstalled cubin and JIT cache in place. FlashInfer requires every package
+# to use the same release version.
 flashinfer_cubin_version=$(sed -n 's/^flashinfer-cubin==//p' \
   "$SOURCE_DIR/requirements/cuda.txt")
 [[ -n $flashinfer_cubin_version ]] || {
@@ -224,6 +225,12 @@ flashinfer_cubin_version=$(sed -n 's/^flashinfer-cubin==//p' \
 uv pip install --system \
   --extra-index-url https://flashinfer.ai/whl/ \
   "flashinfer-cubin==$flashinfer_cubin_version"
+flashinfer_cuda_suffix=$(
+  "$PYTHON" -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))'
+)
+uv pip install --system \
+  --extra-index-url "https://flashinfer.ai/whl/$flashinfer_cuda_suffix/" \
+  "flashinfer-jit-cache==$flashinfer_cubin_version+$flashinfer_cuda_suffix"
 
 "$PYTHON" -c '
 import triton.profiler as proton
