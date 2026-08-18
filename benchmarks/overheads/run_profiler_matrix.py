@@ -23,8 +23,11 @@ MODELS = {
     "llama-3.1-8b": ("meta-llama/Llama-3.1-8B", False),
     "mixtral-8x7b": ("mistralai/Mixtral-8x7B-v0.1", True),
     "qwen3-32b": ("Qwen/Qwen3-32B", False),
+    "qwen3.5-27b": ("Qwen/Qwen3.5-27B", False),
 }
-DEFAULT_MODELS = tuple(name for name in MODELS if name != "qwen3-32b")
+DEFAULT_MODELS = tuple(
+    name for name in MODELS if name not in {"qwen3-32b", "qwen3.5-27b"}
+)
 WORKLOADS = {
     "in2000_out500": (2000, 500),
     "in1000_out1000": (1000, 1000),
