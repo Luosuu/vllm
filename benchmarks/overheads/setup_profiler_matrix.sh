@@ -81,19 +81,24 @@ models = (
     "meta-llama/Llama-3.1-8B",
     "mistralai/Mixtral-8x7B-v0.1",
     "Qwen/Qwen3-32B",
+    "Qwen/Qwen3.5-27B",
 )
 for model in models:
     print(f"Caching configuration for {model}", flush=True)
     snapshot_download(
         repo_id=model,
         allow_patterns=(
+            "chat_template.jinja",
             "config.json",
             "generation_config.json",
             "merges.txt",
+            "preprocessor_config.json",
+            "processor_config.json",
             "special_tokens_map.json",
             "tokenizer.json",
             "tokenizer.model",
             "tokenizer_config.json",
+            "video_preprocessor_config.json",
             "vocab.json",
             "vocab.txt",
         ),

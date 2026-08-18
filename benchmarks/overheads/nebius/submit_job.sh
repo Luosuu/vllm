@@ -256,14 +256,21 @@ fi
 
 response=$("${create[@]}")
 # Some nebius CLI versions print operation progress before the requested JSON.
-# Keep the progress visible on failure, but pass only the JSON object to jq.
+# Prefer the JSON object, then fall back to the human-readable `Job ID:` line
+# emitted by CLI versions that ignore `--format json` for this command.
 response_json=$(sed -n '/^[[:space:]]*{/,$p' <<<"$response")
-if [[ -z $response_json ]]; then
-  echo "nebius ai job create returned no JSON response:" >&2
+job_id=
+if [[ -n $response_json ]]; then
+  job_id=$(jq -er '.metadata.id' <<<"$response_json")
+else
+  job_id=$(sed -n 's/^Job ID:[[:space:]]*\(aijob-[[:alnum:]]*\).*$/\1/p' \
+    <<<"$response" | head -n 1)
+fi
+if [[ -z $job_id ]]; then
+  echo "could not find the Job ID in the nebius create response:" >&2
   printf '%s\n' "$response" >&2
   exit 1
 fi
-job_id=$(jq -er '.metadata.id' <<<"$response_json")
 printf 'Submitted Nebius Job %s (%s)\n' "$job_name" "$job_id"
 printf 'Status:  nebius ai job get %q\n' "$job_id"
 printf 'Logs:    nebius ai job logs %q --follow\n' "$job_id"

@@ -17,13 +17,17 @@ sys.path.insert(0, str(OVERHEAD_DIR))
 from run_profiler_matrix import DEFAULT_MODELS, MODELS  # noqa: E402
 
 ALLOW_PATTERNS = (
+    "chat_template.jinja",
     "config.json",
     "generation_config.json",
     "merges.txt",
+    "preprocessor_config.json",
+    "processor_config.json",
     "special_tokens_map.json",
     "tokenizer.json",
     "tokenizer.model",
     "tokenizer_config.json",
+    "video_preprocessor_config.json",
     "vocab.json",
     "vocab.txt",
 )
