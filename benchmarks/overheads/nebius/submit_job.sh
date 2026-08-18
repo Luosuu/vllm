@@ -156,6 +156,10 @@ if [[ $create_help != *--inject-file* || $create_help != *--args* ]]; then
   echo "this nebius CLI lacks --inject-file/--args; update it first" >&2
   exit 1
 fi
+if [[ $create_help != *--async* ]]; then
+  echo "this nebius CLI lacks --async; update it first" >&2
+  exit 1
+fi
 if [[ -n $hf_secret && $create_help != *--env-secret* ]]; then
   echo "this nebius CLI lacks --env-secret; update it before passing HF_TOKEN" >&2
   exit 1
@@ -246,7 +250,7 @@ create=(
 [[ -z $hf_secret ]] || create+=(--env-secret "HF_TOKEN=${hf_secret}")
 [[ -z $registry_secret ]] || create+=(--registry-secret "$registry_secret")
 [[ $preemptible == 0 ]] || create+=(--preemptible)
-create+=(--format json)
+create+=(--async --format json)
 
 if [[ $dry_run == 1 ]]; then
   printf '%q ' "${create[@]}"
@@ -255,19 +259,22 @@ if [[ $dry_run == 1 ]]; then
 fi
 
 response=$("${create[@]}")
-# Some nebius CLI versions print operation progress before the requested JSON.
-# Prefer the JSON object, then fall back to the human-readable `Job ID:` line
-# emitted by CLI versions that ignore `--format json` for this command.
-response_json=$(sed -n '/^[[:space:]]*{/,$p' <<<"$response")
 job_id=
-if [[ -n $response_json ]]; then
-  job_id=$(jq -er '.metadata.id' <<<"$response_json")
-else
-  job_id=$(sed -n 's/^Job ID:[[:space:]]*\(aijob-[[:alnum:]]*\).*$/\1/p' \
-    <<<"$response" | head -n 1)
-fi
+list_parent=$parent_id
+[[ -n $list_parent ]] || list_parent=$("${nebius_cmd[@]}" config get parent-id)
+deadline=$((SECONDS + 120))
+while ((SECONDS < deadline)); do
+  jobs=$("${nebius_cmd[@]}" ai job list \
+    --parent-id "$list_parent" --format json)
+  job_id=$(jq -r --arg name "$job_name" '
+    [.items[] | select(.metadata.name == $name)]
+    | sort_by(.metadata.created_at) | last | .metadata.id // empty
+  ' <<<"$jobs")
+  [[ -z $job_id ]] || break
+  sleep 2
+done
 if [[ -z $job_id ]]; then
-  echo "could not find the Job ID in the nebius create response:" >&2
+  echo "could not find the asynchronously created Job '$job_name':" >&2
   printf '%s\n' "$response" >&2
   exit 1
 fi
