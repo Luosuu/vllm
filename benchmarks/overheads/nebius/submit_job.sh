@@ -26,6 +26,7 @@ Submission options:
   --subnet-name NAME            Subnet name (default: default-subnet).
   --platform PLATFORM           Default: gpu-h100-sxm.
   --preset PRESET               Default: 8gpu-128vcpu-1600gb.
+  --expected-gpus COUNT         GPU count validated in the Job (default: 8).
   --disk-size SIZE              Default: 1Ti.
   --shm-size SIZE               Default: 64Gi.
   --timeout DURATION            Default: 24h.
@@ -58,6 +59,7 @@ subnet_id=${NEBIUS_SUBNET_ID:-}
 subnet_name=${NEBIUS_SUBNET_NAME:-default-subnet}
 platform=${NEBIUS_PLATFORM:-gpu-h100-sxm}
 preset=${NEBIUS_PRESET:-8gpu-128vcpu-1600gb}
+expected_gpus=${NEBIUS_EXPECTED_GPUS:-8}
 disk_size=${NEBIUS_DISK_SIZE:-1Ti}
 shm_size=${NEBIUS_SHM_SIZE:-64Gi}
 job_timeout=${NEBIUS_JOB_TIMEOUT:-24h}
@@ -87,6 +89,7 @@ while (($#)); do
     --subnet-name) subnet_name=$2; shift 2 ;;
     --platform) platform=$2; shift 2 ;;
     --preset) preset=$2; shift 2 ;;
+    --expected-gpus) expected_gpus=$2; shift 2 ;;
     --disk-size) disk_size=$2; shift 2 ;;
     --shm-size) shm_size=$2; shift 2 ;;
     --timeout) job_timeout=$2; shift 2 ;;
@@ -145,6 +148,10 @@ if [[ $storage_mode == object && -n ${NEBIUS_BUCKET_NAME:-} ]]; then
 fi
 [[ $sync_interval =~ ^[0-9]+$ ]] || {
   echo "--sync-interval must be a non-negative integer" >&2
+  exit 2
+}
+[[ $expected_gpus =~ ^[1-9][0-9]*$ ]] || {
+  echo "--expected-gpus must be a positive integer" >&2
   exit 2
 }
 
@@ -240,7 +247,7 @@ create=(
   --env "VLLM_JOB_NAME=${job_name}"
   --env "VLLM_JOB_ID_MARKER=${job_id_marker}"
   --env "VLLM_SYNC_INTERVAL=${sync_interval}"
-  --env "VLLM_EXPECTED_GPUS=8"
+  --env "VLLM_EXPECTED_GPUS=${expected_gpus}"
   --env "VLLM_JOB_PREFLIGHT_ONLY=${preflight_only}"
   --env "VLLM_WORKER_MULTIPROC_METHOD=spawn"
   --env "NEBIUS_PLATFORM=${platform}"

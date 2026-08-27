@@ -128,7 +128,8 @@ environment metadata.
 The default resource request is `gpu-h100-sxm` with the
 `8gpu-128vcpu-1600gb` preset, a 1 TiB container disk, 64 GiB `/dev/shm`, and a
 24-hour timeout. Override these with submission flags when the project exposes
-another platform or preset.
+another platform or preset. When changing the preset's GPU count, pass the
+matching `--expected-gpus` value so the Job validates the intended allocation.
 
 Add `--dry-run` to print the exact `nebius ai job create` command without
 creating cloud resources. Add `--detach` to return after submission; otherwise
