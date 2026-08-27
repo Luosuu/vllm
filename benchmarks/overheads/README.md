@@ -212,9 +212,13 @@ data. Both runners support:
 --proton-hook triton
 --proton-output-format {hatchet,hatchet_msgpack,chrome_trace}
 --detailed-trace-annotation
+--use-v2-model-runner
 ```
 
 The single-case runner additionally supports `--proton-backends`.
+Use `--use-v2-model-runner` when profiling MRV2-specific bookkeeping kernels;
+otherwise the benchmark preserves vLLM's architecture-dependent runner
+selection.
 
 Detailed annotations add host-side scheduler metrics to each execute scope.
 Use them for diagnostic profiles; leave them disabled for the paper's profiler

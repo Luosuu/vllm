@@ -105,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="VLLM_ALL2ALL_BACKEND used by MoE expert-parallel cases.",
     )
     parser.add_argument(
+        "--use-v2-model-runner",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly select Model Runner V2 for profiler server processes.",
+    )
+    parser.add_argument(
         "--torch-profiler-record-shapes",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -414,6 +420,12 @@ def build_command(
         if args.detailed_trace_annotation
         else "--no-detailed-trace-annotation"
     )
+    if args.use_v2_model_runner is not None:
+        command.append(
+            "--use-v2-model-runner"
+            if args.use_v2_model_runner
+            else "--no-use-v2-model-runner"
+        )
     torch_options = {
         "torch-profiler-record-shapes": args.torch_profiler_record_shapes,
         "torch-profiler-with-memory": args.torch_profiler_with_memory,

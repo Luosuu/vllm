@@ -137,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_bool_argument(parser, "--cudagraph", True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--engine-args-json", type=parse_json_object, default={})
+    parser.add_argument(
+        "--use-v2-model-runner",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly set VLLM_USE_V2_MODEL_RUNNER for the server process.",
+    )
 
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
@@ -551,6 +557,8 @@ def run_once(
         "PATH": python_bin + os.pathsep + os.environ.get("PATH", ""),
         "VLLM_ALL2ALL_BACKEND": args.all2all_backend,
     }
+    if args.use_v2_model_runner is not None:
+        env["VLLM_USE_V2_MODEL_RUNNER"] = "1" if args.use_v2_model_runner else "0"
     if case["profiler"] in ("nsys", "rocprof"):
         env |= {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
     temp_context = (
