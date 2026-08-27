@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.profiler.wrapper import ProtonProfilerWrapper
 from vllm.v1.worker.cpu_worker import CPUWorker
+from vllm.v1.worker.gpu.input_batch import _mrv2_launch_metadata
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
 
@@ -319,6 +320,19 @@ class TestProtonProfilerWrapper:
 
         proton.scope.assert_called_once_with("decode", metrics=metrics)
         assert context is not None
+
+
+def test_mrv2_launch_metadata_names_kernel_and_batch_size():
+    metadata = _mrv2_launch_metadata(
+        (3,),
+        SimpleNamespace(name="_prepare_pos_seq_lens_kernel"),
+        {"idx_mapping_ptr": torch.empty(3)},
+    )
+
+    assert metadata == {
+        "name": "mrv2.prepare_pos_seq_lens [num_reqs=3]",
+        "num_reqs": 3,
+    }
 
 
 @pytest.mark.parametrize("runner", ["disabled", "v1", "v2"])

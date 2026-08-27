@@ -1110,6 +1110,35 @@ class Worker(WorkerBase):
             "num_generation_requests": iteration_details.num_generation_requests,
             "num_generation_tokens": iteration_details.num_generation_tokens,
         }
+        if self.vllm_config.profiler_config.detailed_trace_annotation:
+            preempted_req_ids = scheduler_output.preempted_req_ids or ()
+            spec_decode_tokens = sum(
+                len(tokens)
+                for tokens in scheduler_output.scheduled_spec_decode_tokens.values()
+            )
+            metrics.update(
+                {
+                    "num_scheduled_requests": len(
+                        scheduler_output.num_scheduled_tokens
+                    ),
+                    "num_new_requests": len(scheduler_output.scheduled_new_reqs),
+                    "num_cached_requests": len(
+                        scheduler_output.scheduled_cached_reqs.req_ids
+                    ),
+                    "num_finished_requests": len(scheduler_output.finished_req_ids),
+                    "num_preempted_requests": len(preempted_req_ids),
+                    "total_scheduled_tokens": (
+                        scheduler_output.total_num_scheduled_tokens
+                    ),
+                    "num_spec_decode_tokens": spec_decode_tokens,
+                    "num_common_prefix_blocks": sum(
+                        scheduler_output.num_common_prefix_blocks
+                    ),
+                    "num_spec_tokens_to_schedule": (
+                        scheduler_output.num_spec_tokens_to_schedule
+                    ),
+                }
+            )
         return self.profiler.annotate_context_manager(annotation, metrics=metrics)
 
     @torch.inference_mode()

@@ -142,6 +142,12 @@ The Proton-specific options are:
 `delay_iterations`; starting the session synchronously ensures initialization
 errors are returned by `/start_profile`.
 
+With `detailed_trace_annotation` enabled, each execute scope also records
+host-side scheduler metrics, including scheduled, new, cached, finished, and
+preempted request counts, speculative-token counts, and common-prefix blocks.
+When the V2 GPU model runner is active, `proton_hook: "triton"` also gives its
+bookkeeping kernels stable `mrv2.*` names with the launch request count.
+
 Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
 `rocprofiler` requires a ROCm installation. vLLM does not expose Proton's
 experimental instrumentation backend because current upstream Triton builds

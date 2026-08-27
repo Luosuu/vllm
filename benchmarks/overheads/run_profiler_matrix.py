@@ -74,6 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("proton", "torch", "nsys", "rocprof"),
         default=("proton", "torch", "nsys"),
     )
+    parser.add_argument(
+        "--proton-context", choices=("shadow", "python"), default="shadow"
+    )
+    parser.add_argument("--proton-data", choices=("tree", "trace"), default="tree")
+    parser.add_argument("--proton-mode")
+    parser.add_argument("--proton-hook", choices=("triton",))
+    parser.add_argument(
+        "--proton-output-format",
+        choices=("hatchet", "hatchet_msgpack", "chrome_trace"),
+    )
+    parser.add_argument(
+        "--detailed-trace-annotation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument("--num-prompts", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=256)
     parser.add_argument("--max-num-batched-tokens", type=int, default=8192)
@@ -291,7 +306,7 @@ def expected_profiler_label(args: argparse.Namespace, profiler: str) -> str:
         else "torch:custom"
     )
     return {
-        "proton": "proton:auto:shadow:tree",
+        "proton": f"proton:auto:{args.proton_context}:{args.proton_data}",
         "torch": torch_label,
         "nsys": f"nsys:{args.nsys_cuda_graph_trace}",
         "rocprof": f"rocprof:{args.rocprof_trace}",
@@ -378,6 +393,10 @@ def build_command(
         args.all2all_backend,
         "--profile-save-timeout",
         str(args.profile_save_timeout),
+        "--proton-context",
+        args.proton_context,
+        "--proton-data",
+        args.proton_data,
         (
             "--finalize-non-proton"
             if args.finalize_non_proton
@@ -386,6 +405,15 @@ def build_command(
     ]
     if args.max_concurrency is not None:
         command.extend(["--max-concurrency", str(args.max_concurrency)])
+    for option in ("proton-mode", "proton-hook", "proton-output-format"):
+        value = getattr(args, option.replace("-", "_"))
+        if value is not None:
+            command.extend([f"--{option}", value])
+    command.append(
+        "--detailed-trace-annotation"
+        if args.detailed_trace_annotation
+        else "--no-detailed-trace-annotation"
+    )
     torch_options = {
         "torch-profiler-record-shapes": args.torch_profiler_record_shapes,
         "torch-profiler-with-memory": args.torch_profiler_with_memory,

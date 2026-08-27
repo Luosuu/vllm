@@ -246,7 +246,7 @@ class TestIsUriPath:
 class TestAnnotateProfile:
     """Tests for Worker.annotate_profile() annotation string formatting."""
 
-    def _annotate(self, detailed: bool) -> str:
+    def _annotate(self, detailed: bool) -> tuple[str, dict[str, int]]:
         worker = MagicMock()
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
         worker.profiler = MagicMock()
@@ -265,21 +265,43 @@ class TestAnnotateProfile:
             scheduled_new_reqs=[ctx_req],
             scheduled_cached_reqs=cached,
             num_scheduled_tokens={"ctx1": 4, "gen1": 1},
+            total_num_scheduled_tokens=5,
+            scheduled_spec_decode_tokens={"gen1": [1, 2]},
+            num_common_prefix_blocks=[2, 3],
+            finished_req_ids={"done1"},
+            preempted_req_ids={"preempted1"},
+            num_spec_tokens_to_schedule=4,
         )
 
         Worker.annotate_profile(worker, sched)
-        return worker.profiler.annotate_context_manager.call_args[0][0]
+        call = worker.profiler.annotate_context_manager.call_args
+        return call.args[0], call.kwargs["metrics"]
 
     def test_simple_format_mixed(self):
-        assert self._annotate(detailed=False) == (
-            "execute_context_1(4)_generation_1(1)"
-        )
+        annotation, _ = self._annotate(detailed=False)
+        assert annotation == "execute_context_1(4)_generation_1(1)"
 
     def test_detailed_format_mixed(self):
         # ctx1: sq=4, sk=4, sqsq=16, sqsk=16 | gen1: sq=1, sk=11, sqsq=1, sqsk=11 | bs=5
-        assert self._annotate(detailed=True) == (
+        annotation, metrics = self._annotate(detailed=True)
+        assert annotation == (
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
+        assert metrics == {
+            "num_context_requests": 1,
+            "num_context_tokens": 4,
+            "num_generation_requests": 1,
+            "num_generation_tokens": 1,
+            "num_scheduled_requests": 2,
+            "num_new_requests": 1,
+            "num_cached_requests": 1,
+            "num_finished_requests": 1,
+            "num_preempted_requests": 1,
+            "total_scheduled_tokens": 5,
+            "num_spec_decode_tokens": 2,
+            "num_common_prefix_blocks": 5,
+            "num_spec_tokens_to_schedule": 4,
+        }
 
     def test_skips_annotations_outside_profile_window(self):
         worker = MagicMock()

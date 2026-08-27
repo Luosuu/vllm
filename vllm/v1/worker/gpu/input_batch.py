@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
+
+
+def _mrv2_launch_metadata(
+    grid: tuple[int, ...], kernel: Any, args: dict[str, Any]
+) -> dict[str, Any]:
+    del grid
+    kernel_name = kernel.name.removeprefix("_").removesuffix("_kernel")
+    num_reqs = args["idx_mapping_ptr"].shape[0]
+    return {
+        "name": f"mrv2.{kernel_name} [num_reqs={num_reqs}]",
+        "num_reqs": num_reqs,
+    }
 
 
 class InputBuffers:
@@ -182,7 +195,7 @@ class InputBatch:
         )
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
     next_prefill_tokens_ptr,
@@ -242,7 +255,7 @@ def prepare_prefill_inputs(
     )
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
     seq_lens_ptr,
@@ -300,7 +313,7 @@ def prepare_pos_seq_lens(
     )
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
     idx_mapping_ptr,
@@ -406,7 +419,7 @@ def combine_sampled_and_draft_tokens(
     return logits_indices
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _get_num_sampled_and_rejected_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
@@ -455,7 +468,7 @@ def get_num_sampled_and_rejected(
     return num_sampled, num_rejected
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _post_update_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
@@ -557,7 +570,7 @@ def post_update(
     )
 
 
-@triton.jit
+@triton.jit(launch_metadata=_mrv2_launch_metadata)
 def _post_update_num_computed_tokens_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,

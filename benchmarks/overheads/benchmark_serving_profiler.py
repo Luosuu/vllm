@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--proton-output-format",
         choices=("hatchet", "hatchet_msgpack", "chrome_trace"),
     )
+    add_bool_argument(parser, "--detailed-trace-annotation", False)
     add_bool_argument(parser, "--torch-profiler-record-shapes", False)
     add_bool_argument(parser, "--torch-profiler-with-memory", False)
     add_bool_argument(parser, "--torch-profiler-with-stack", False)
@@ -205,6 +206,7 @@ def profiler_config(
         return {
             "profiler": "torch",
             "torch_profiler_dir": str(profile_dir),
+            "detailed_trace_annotation": args.detailed_trace_annotation,
             "torch_profiler_record_shapes": args.torch_profiler_record_shapes,
             "torch_profiler_with_memory": args.torch_profiler_with_memory,
             "torch_profiler_with_stack": args.torch_profiler_with_stack,
@@ -219,6 +221,7 @@ def profiler_config(
         "proton_profiler_dir": str(profile_dir),
         "proton_context": args.proton_context,
         "proton_data": args.proton_data,
+        "detailed_trace_annotation": args.detailed_trace_annotation,
     }
     if case["backend"] != "auto":
         config["proton_backend"] = case["backend"]
@@ -541,7 +544,7 @@ def run_once(
         profile_dir,
         port,
         input_len + output_len + args.max_model_len_margin,
-        nsys_session
+        nsys_session,
     )
     python_bin = str(Path(sys.executable).parent)
     env = os.environ | {

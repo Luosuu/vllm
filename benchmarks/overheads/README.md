@@ -203,16 +203,22 @@ metrics.
 ### Proton
 
 The matrix defaults to Proton's `auto` backend with `shadow` context and `tree`
-data. The single-case runner additionally supports:
+data. Both runners support:
 
 ```text
---proton-backends
 --proton-context {shadow,python}
 --proton-data {tree,trace}
 --proton-mode
 --proton-hook triton
 --proton-output-format {hatchet,hatchet_msgpack,chrome_trace}
+--detailed-trace-annotation
 ```
+
+The single-case runner additionally supports `--proton-backends`.
+
+Detailed annotations add host-side scheduler metrics to each execute scope.
+Use them for diagnostic profiles; leave them disabled for the paper's profiler
+overhead measurements.
 
 Worker output names include parallel ranks so DP workers do not overwrite one
 another.
