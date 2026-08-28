@@ -4,13 +4,15 @@
 import importlib
 import inspect
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from typing import Literal
 
 import torch
 from packaging.version import InvalidVersion, Version
+from torch.utils.hooks import RemovableHandle
 from typing_extensions import override
 
 from vllm.config import ProfilerConfig
@@ -20,6 +22,88 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _TRITON_ADVANCED_PROTON_VERSION = Version("3.8.0")
+_TRANSFORMER_LAYER_RE = re.compile(
+    r"(?:^|\.)(?:layers|blocks|h)\.\d+(?:\.(?:self_attn|attention|attn|mlp|"
+    r"feed_forward|moe))?$"
+)
+
+
+def proton_scope(
+    profiler_config: ProfilerConfig,
+    name: str,
+    metrics: dict[str, float | int] | None = None,
+):
+    """Return a Proton scope when Proton profiling is configured."""
+    if profiler_config.profiler != "proton":
+        return nullcontext()
+    proton = importlib.import_module("triton.profiler")
+    return proton.scope(name, metrics=metrics)
+
+
+def proton_cudagraph_scope(
+    profiler_config: ProfilerConfig,
+    phase: Literal["capture", "replay"],
+    mode: str,
+    graph_id: int,
+    num_tokens: int,
+    num_reqs: int | None = None,
+):
+    """Build a consistent, searchable CUDA graph annotation."""
+    metrics = {
+        "graph_id": graph_id,
+        "num_tokens": num_tokens,
+    }
+    if num_reqs is not None:
+        metrics["num_reqs"] = num_reqs
+    dimensions = [f"graph_id={graph_id}", f"num_tokens={num_tokens}"]
+    if num_reqs is not None:
+        dimensions.append(f"num_reqs={num_reqs}")
+    name = f"cudagraph_{phase}_{mode.lower()} [{','.join(dimensions)}]"
+    return proton_scope(profiler_config, name, metrics=metrics)
+
+
+class _ProtonLayerwiseHooks:
+    """Add low-cardinality model-layer scopes during CUDA graph capture."""
+
+    def __init__(self, proton) -> None:
+        self._proton = proton
+        self._handles: list[RemovableHandle] = []
+        self._active_scopes: dict[int, list] = {}
+        self._scope_names: dict[int, str] = {}
+
+    @staticmethod
+    def _should_annotate(module_name: str) -> bool:
+        return _TRANSFORMER_LAYER_RE.search(module_name) is not None
+
+    def _enter(self, module: torch.nn.Module, _inputs) -> None:
+        scope_name = self._scope_names[id(module)]
+        scope = self._proton.scope(scope_name)
+        scope.__enter__()
+        self._active_scopes.setdefault(id(module), []).append(scope)
+
+    def _exit(self, module: torch.nn.Module, _inputs, _output) -> None:
+        scopes = self._active_scopes.get(id(module))
+        if not scopes:
+            return
+        scope = scopes.pop()
+        scope.__exit__(None, None, None)
+
+    def install(self, model: torch.nn.Module) -> None:
+        for module_name, module in model.named_modules():
+            if not self._should_annotate(module_name):
+                continue
+            self._scope_names[id(module)] = module_name
+            self._handles.append(module.register_forward_pre_hook(self._enter))
+            self._handles.append(
+                module.register_forward_hook(self._exit, always_call=True)
+            )
+
+    def remove(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+        self._active_scopes.clear()
+        self._scope_names.clear()
 
 
 class WorkerProfiler(ABC):
@@ -379,9 +463,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._session_id: int | None = None
         self._run_id = 0
         self._capture_session_id: int | None = None
+        self._precreated_session_id: int | None = None
         self._capture_output_path = os.path.join(
             self._output_dir,
-            f".proton_cuda_graph_capture_{worker_name}_{os.getpid()}",
+            f"proton_{worker_name}_cuda_graph_capture",
         )
 
         logger.info_once(
@@ -461,12 +546,14 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
 
     @contextmanager
-    def capture_cuda_graphs(self) -> Iterator[None]:
+    def capture_cuda_graphs(
+        self, model: torch.nn.Module | None = None
+    ) -> Iterator[None]:
         """Keep a dormant session aware of CUDA graphs captured by vLLM.
 
-        Proton must observe graph creation before it can associate later graph
-        replays with kernels. This capture-only session stays dormant while
-        requested profiles use separate, clean sessions.
+        Proton must observe graph creation in the same session that later
+        records graph replay. A capture-only session is retained separately,
+        while the first runtime session is pre-created here for context linking.
         """
         if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
             raise ValueError(
@@ -484,16 +571,41 @@ class ProtonProfilerWrapper(WorkerProfiler):
         else:
             self._proton.activate(session=self._capture_session_id)
 
+        if self._precreated_session_id is None:
+            output_path = f"{self._output_path}_run{self._run_id}"
+            self._precreated_session_id = self._create_session(output_path)
+            self._run_id += 1
+        else:
+            self._proton.activate(session=self._precreated_session_id)
+        assert self._capture_session_id is not None
+        assert self._precreated_session_id is not None
+
+        layerwise_hooks = None
         try:
+            if model is not None:
+                layerwise_hooks = _ProtonLayerwiseHooks(self._proton)
+                layerwise_hooks.install(model)
             yield
         finally:
-            self._proton.deactivate(session=self._capture_session_id)
+            try:
+                if layerwise_hooks is not None:
+                    layerwise_hooks.remove()
+            finally:
+                try:
+                    self._proton.deactivate(session=self._precreated_session_id)
+                finally:
+                    self._proton.deactivate(session=self._capture_session_id)
 
     @override
     def _start(self) -> None:
-        output_path = f"{self._output_path}_run{self._run_id}"
-        self._session_id = self._create_session(output_path)
-        self._run_id += 1
+        if self._precreated_session_id is not None:
+            self._session_id = self._precreated_session_id
+            self._precreated_session_id = None
+            self._proton.activate(session=self._session_id)
+        else:
+            output_path = f"{self._output_path}_run{self._run_id}"
+            self._session_id = self._create_session(output_path)
+            self._run_id += 1
 
     @override
     def _stop(self) -> None:
@@ -503,14 +615,15 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._proton.deactivate(session=session_id)
         finally:
             try:
-                if self._output_format is None:
-                    self._proton.finalize(session=session_id)
-                else:
-                    self._proton.finalize(
-                        session=session_id, output_format=self._output_format
-                    )
+                self._finalize_runtime_session(session_id)
             finally:
                 self._session_id = None
+
+    def _finalize_runtime_session(self, session_id: int) -> None:
+        if self._output_format is None:
+            self._proton.finalize(session=session_id)
+        else:
+            self._proton.finalize(session=session_id, output_format=self._output_format)
 
     @override
     def shutdown(self) -> None:
@@ -529,15 +642,22 @@ class ProtonProfilerWrapper(WorkerProfiler):
                     "Failed to finalize Proton CUDA graph capture during "
                     "worker shutdown."
                 )
-            finally:
-                with suppress(FileNotFoundError):
-                    os.remove(f"{self._capture_output_path}.hatchet")
+        if self._precreated_session_id is not None:
+            precreated_session_id = self._precreated_session_id
+            self._precreated_session_id = None
+            try:
+                self._finalize_runtime_session(precreated_session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize pre-created Proton runtime session "
+                    "during worker shutdown."
+                )
 
     @override
     def annotate_context_manager(
         self, name: str, metrics: dict[str, float | int] | None = None
     ):
-        return self._proton.scope(name, metrics=metrics)
+        return self._proton.cpu_timed_scope(name, metrics=metrics)
 
 
 class CudaProfilerWrapper(WorkerProfiler):

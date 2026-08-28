@@ -947,7 +947,7 @@ class Worker(WorkerBase):
 
         self._get_or_create_profiler()
         assert isinstance(self.profiler, ProtonProfilerWrapper)
-        return self.profiler.capture_cuda_graphs()
+        return self.profiler.capture_cuda_graphs(model=self.model_runner.get_model())
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()

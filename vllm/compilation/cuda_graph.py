@@ -24,6 +24,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.profiler.wrapper import proton_cudagraph_scope, proton_scope
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
 
 logger = init_logger(__name__)
@@ -127,6 +128,7 @@ class CUDAGraphLogging:
 @dataclasses.dataclass
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
+    graph_id: int
     cudagraph: torch.cuda.CUDAGraph | None = None
     output: Any | None = None
 
@@ -186,6 +188,7 @@ class CUDAGraphWrapper:
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
+        self.proton_scope_name = getattr(runnable, "proton_scope_name", None)
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
@@ -251,13 +254,17 @@ class CUDAGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
-            return self.runnable(*args, **kwargs)
+            if self.proton_scope_name is None:
+                return self.runnable(*args, **kwargs)
+            with proton_scope(self.vllm_config.profiler_config, self.proton_scope_name):
+                return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
         if batch_descriptor not in self.concrete_cudagraph_entries:
             # create a new entry for this batch descriptor
             self.concrete_cudagraph_entries[batch_descriptor] = CUDAGraphEntry(
-                batch_descriptor=batch_descriptor
+                batch_descriptor=batch_descriptor,
+                graph_id=len(self.concrete_cudagraph_entries),
             )
 
         entry = self.concrete_cudagraph_entries[batch_descriptor]
@@ -283,6 +290,16 @@ class CUDAGraphWrapper:
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
+                stack.enter_context(
+                    proton_cudagraph_scope(
+                        self.vllm_config.profiler_config,
+                        "capture",
+                        self.runtime_mode.name,
+                        entry.graph_id,
+                        entry.batch_descriptor.num_tokens,
+                        entry.batch_descriptor.num_reqs,
+                    )
+                )
                 if self.cudagraph_options.gc_disable:
                     # during every model forward for piecewise cudagraph
                     # mode, we will capture many pieces of cudagraphs
@@ -316,7 +333,14 @@ class CUDAGraphWrapper:
                     stream=current_stream(),
                 ):
                     # `output` is managed by pytorch's cudagraph pool
-                    output = self.runnable(*args, **kwargs)
+                    if self.proton_scope_name is None:
+                        output = self.runnable(*args, **kwargs)
+                    else:
+                        with proton_scope(
+                            self.vllm_config.profiler_config,
+                            self.proton_scope_name,
+                        ):
+                            output = self.runnable(*args, **kwargs)
                     # Join offloader's copy stream after forward to avoid
                     # unjoined stream error. The last layer's start_prefetch
                     # forks copy_stream, but wait_prefetch only happens in
@@ -357,5 +381,13 @@ class CUDAGraphWrapper:
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
-        entry.cudagraph.replay()
+        with proton_cudagraph_scope(
+            self.vllm_config.profiler_config,
+            "replay",
+            self.runtime_mode.name,
+            entry.graph_id,
+            entry.batch_descriptor.num_tokens,
+            entry.batch_descriptor.num_reqs,
+        ):
+            entry.cudagraph.replay()
         return entry.output

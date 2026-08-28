@@ -10,8 +10,9 @@ import pytest
 import torch
 from pydantic import ValidationError
 
+from vllm.compilation.piecewise_backend import infer_proton_layer_scope
 from vllm.config import CUDAGraphMode, ProfilerConfig
-from vllm.profiler.wrapper import ProtonProfilerWrapper
+from vllm.profiler.wrapper import ProtonProfilerWrapper, proton_cudagraph_scope
 from vllm.v1.worker.cpu_worker import CPUWorker
 from vllm.v1.worker.gpu.input_batch import _mrv2_launch_metadata
 from vllm.v1.worker.gpu_worker import Worker
@@ -27,6 +28,7 @@ def make_proton(
         deactivate=Mock(),
         finalize=Mock(),
         scope=Mock(return_value=nullcontext()),
+        cpu_timed_scope=Mock(return_value=nullcontext()),
     )
 
 
@@ -177,15 +179,22 @@ class TestProtonProfilerWrapper:
 
         with wrapper.capture_cuda_graphs():
             assert wrapper._capture_session_id == 7
+            assert wrapper._precreated_session_id == 8
 
-        proton.start.assert_called_once()
-        assert proton.start.call_args.kwargs["mode"] == "custom"
-        proton.deactivate.assert_called_once_with(session=7)
+        assert proton.start.call_count == 2
+        assert proton.start.call_args_list[0].kwargs["name"] == os.path.join(
+            tmp_path, "proton_rank_3_cuda_graph_capture"
+        )
+        assert proton.start.call_args_list[1].kwargs["name"] == os.path.join(
+            tmp_path, "proton_rank_3_run0"
+        )
+        assert all(c.kwargs["mode"] == "custom" for c in proton.start.call_args_list)
+        assert proton.deactivate.call_args_list == [call(session=8), call(session=7)]
 
         wrapper.start()
         assert wrapper._session_id == 8
         assert proton.start.call_count == 2
-        proton.activate.assert_not_called()
+        proton.activate.assert_called_once_with(session=8)
 
     def test_pcsampling_rejects_cuda_graph_capture(self, tmp_path):
         wrapper, proton = make_wrapper(tmp_path, proton_mode="pcsampling")
@@ -199,7 +208,9 @@ class TestProtonProfilerWrapper:
         proton.start.assert_not_called()
 
     def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
-        wrapper, proton = make_wrapper(tmp_path)
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_wrapper(tmp_path, proton)
 
         with (
             pytest.raises(RuntimeError, match="capture failed"),
@@ -207,7 +218,7 @@ class TestProtonProfilerWrapper:
         ):
             raise RuntimeError("capture failed")
 
-        proton.deactivate.assert_called_once_with(session=7)
+        assert proton.deactivate.call_args_list == [call(session=8), call(session=7)]
 
     @pytest.mark.parametrize("fail_cleanup", [False, True])
     def test_shutdown_finalizes_all_sessions_and_resets_state(
@@ -231,8 +242,9 @@ class TestProtonProfilerWrapper:
         assert (
             wrapper._session_id,
             wrapper._capture_session_id,
+            wrapper._precreated_session_id,
             wrapper._running,
-        ) == (None, None, False)
+        ) == (None, None, None, False)
 
     @pytest.mark.parametrize(
         ("session_id", "start_error", "message"),
@@ -318,8 +330,71 @@ class TestProtonProfilerWrapper:
         metrics = {"num_tokens": 32, "num_requests": 2}
         context = wrapper.annotate_context_manager("decode", metrics=metrics)
 
-        proton.scope.assert_called_once_with("decode", metrics=metrics)
+        proton.cpu_timed_scope.assert_called_once_with("decode", metrics=metrics)
         assert context is not None
+
+    def test_capture_adds_and_removes_layerwise_scopes(self, tmp_path):
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.self_attn = torch.nn.Identity()
+                self.mlp = torch.nn.Identity()
+
+            def forward(self, inputs):
+                return self.mlp(self.self_attn(inputs))
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, inputs):
+                return self.layers[0](inputs)
+
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_wrapper(tmp_path, proton)
+        model = Model()
+
+        with wrapper.capture_cuda_graphs(model=model):
+            model(torch.ones(1))
+
+        scope_names = [call.args[0] for call in proton.scope.call_args_list]
+        assert scope_names == ["layers.0", "layers.0.self_attn", "layers.0.mlp"]
+
+        model(torch.ones(1))
+        assert len(proton.scope.call_args_list) == 3
+
+
+def test_cudagraph_scope_has_searchable_name_and_metrics(tmp_path):
+    config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
+    proton = make_proton()
+
+    with patch("vllm.profiler.wrapper.importlib.import_module", return_value=proton):
+        context = proton_cudagraph_scope(
+            config,
+            "replay",
+            "FULL",
+            graph_id=3,
+            num_tokens=128,
+            num_reqs=4,
+        )
+
+    proton.scope.assert_called_once_with(
+        "cudagraph_replay_full [graph_id=3,num_tokens=128,num_reqs=4]",
+        metrics={"graph_id": 3, "num_tokens": 128, "num_reqs": 4},
+    )
+    assert context is not None
+
+
+def test_infers_layer_scope_from_dynamo_module_metadata():
+    graph = torch.fx.symbolic_trace(torch.nn.Identity())
+    node = next(node for node in graph.graph.nodes if node.op == "call_module")
+    node.meta["nn_module_stack"] = {
+        "layer": ("L['self'].model.layers[12].mlp", torch.nn.Module)
+    }
+
+    assert infer_proton_layer_scope(graph) == "model.layers.12"
 
 
 def test_mrv2_launch_metadata_names_kernel_and_batch_size():

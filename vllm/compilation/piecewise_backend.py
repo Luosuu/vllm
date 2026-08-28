@@ -5,6 +5,7 @@ import dataclasses
 import io
 import json
 import pickle
+import re
 from collections.abc import Callable
 from pickle import Pickler
 from typing import Any
@@ -21,6 +22,27 @@ from vllm.config.utils import Range
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_LAYER_PATH_RE = re.compile(r"(?:layers|blocks|h)(?:\.|\[)(\d+)(?:\])?")
+
+
+def infer_proton_layer_scope(graph: fx.GraphModule | None) -> str | None:
+    """Infer transformer-layer ownership from Dynamo node metadata."""
+    if graph is None:
+        return None
+    layer_indices: set[int] = set()
+    for node in graph.graph.nodes:
+        module_stack = node.meta.get("nn_module_stack")
+        if not module_stack:
+            continue
+        for match in _LAYER_PATH_RE.finditer(str(module_stack)):
+            layer_indices.add(int(match.group(1)))
+    if not layer_indices:
+        return None
+    ordered = sorted(layer_indices)
+    if len(ordered) == 1:
+        return f"model.layers.{ordered[0]}"
+    return f"model.layers.{ordered[0]}_to_{ordered[-1]}"
 
 
 def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
@@ -127,6 +149,7 @@ class PiecewiseBackend:
         self.vllm_backend = vllm_backend
         self.compiled_runnables = compiled_runnables
         self.submod_name = submod_name
+        self.proton_scope_name = infer_proton_layer_scope(graph)
 
         self.is_first_graph = piecewise_compile_index == 0
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1

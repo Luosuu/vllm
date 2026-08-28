@@ -26,6 +26,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.profiler.wrapper import proton_cudagraph_scope
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -131,6 +132,7 @@ class CudaGraphManager:
         self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self.graph_ids: dict[BatchExecutionDescriptor, int] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
@@ -328,33 +330,44 @@ class CudaGraphManager:
                     logger.debug(
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
-                    if (
-                        desc.cg_mode == CUDAGraphMode.PIECEWISE
-                        and not self.use_breakable_cg
+                    graph_id = len(self.graph_ids)
+                    self.graph_ids[desc] = graph_id
+                    with proton_cudagraph_scope(
+                        self.vllm_config.profiler_config,
+                        "capture",
+                        desc.cg_mode.name,
+                        graph_id,
+                        desc.num_tokens,
+                        desc.num_reqs,
                     ):
-                        forward_fn(CUDAGraphMode.PIECEWISE)
-                    else:
-                        # Capture with fresh attention state.
-                        forward_fn = create_forward_fn(desc, warmup=False)
-                        if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                        if (
+                            desc.cg_mode == CUDAGraphMode.PIECEWISE
+                            and not self.use_breakable_cg
+                        ):
                             forward_fn(CUDAGraphMode.PIECEWISE)
-                            continue
-                        assert desc not in self.graphs, (
-                            f"Graph already captured for {desc}"
-                        )
-                        graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
-                        get_offloader().sync_prev_onload()
-                        with torch.cuda.graph(graph, self.pool):
-                            forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
-                            get_offloader().join_after_forward()
-                        self.graphs[desc] = graph
-                        compilation_counter.num_cudagraph_captured += 1
+                        else:
+                            # Capture with fresh attention state.
+                            forward_fn = create_forward_fn(desc, warmup=False)
+                            if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                                forward_fn(CUDAGraphMode.PIECEWISE)
+                                continue
+                            assert desc not in self.graphs, (
+                                f"Graph already captured for {desc}"
+                            )
+                            graph = torch.cuda.CUDAGraph()
+                            # Sync offloader's copy stream before capture.
+                            # Ensure pre-capture offloader prefetches are
+                            # complete.
+                            get_offloader().sync_prev_onload()
+                            with torch.cuda.graph(graph, self.pool):
+                                forward_fn(CUDAGraphMode.NONE)
+                                # Join offloader's copy stream after forward to avoid
+                                # unjoined stream error. The last layer's start_prefetch
+                                # forks copy_stream, but wait_prefetch only happens in
+                                # the next forward pass.
+                                get_offloader().join_after_forward()
+                            self.graphs[desc] = graph
+                            compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
 
     def dispatch(
@@ -398,7 +411,15 @@ class CudaGraphManager:
         # cannot see. Without this, replay could overwrite static buffers
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
-        self.graphs[desc].replay()
+        with proton_cudagraph_scope(
+            self.vllm_config.profiler_config,
+            "replay",
+            desc.cg_mode.name,
+            self.graph_ids[desc],
+            desc.num_tokens,
+            desc.num_reqs,
+        ):
+            self.graphs[desc].replay()
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
