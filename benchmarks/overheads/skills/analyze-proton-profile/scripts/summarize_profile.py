@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-hidden",
         action="store_true",
-        help="Include hidden CUDA Graph capture sidecar profiles.",
+        help="Include hidden and CUDA Graph capture sidecar profiles.",
     )
     return parser
 
@@ -96,7 +96,10 @@ def discover_profiles(paths: Iterable[Path], include_hidden: bool) -> list[Path]
         else:
             raise FileNotFoundError(path)
         for candidate in candidates:
-            if include_hidden or not candidate.name.startswith("."):
+            is_capture_sidecar = "_cuda_graph_capture" in candidate.stem
+            if include_hidden or (
+                not candidate.name.startswith(".") and not is_capture_sidecar
+            ):
                 profiles.add(candidate.resolve())
     if not profiles:
         raise ValueError("no Hatchet profiles found")
@@ -266,8 +269,10 @@ def render_markdown(summaries: list[ProfileSummary]) -> str:
     lines.extend(
         [
             "",
-            "Heuristic categories classify leaf kernels by name. Validate `other` "
-            "and unfamiliar names before drawing conclusions.",
+            (
+                "Heuristic categories classify leaf kernels by name. Validate "
+                "`other` and unfamiliar names before drawing conclusions."
+            ),
         ]
     )
     return "\n".join(lines)

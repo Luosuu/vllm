@@ -50,6 +50,21 @@ proton-viewer -m avg_time/us,count --print-sorted -t 10 profile.hatchet
 # Scheduler shape and token attribution.
 proton-viewer -m time/ms,num_generation_tokens -t 500 -d 3 profile.hatchet
 
+# Compare GPU time with host-side execute time.
+proton-viewer -m time/us,cpu_time/us,count -i '.*execute_.*' -d 2 profile.hatchet
+
+# Verify CUDA Graph replay-to-capture context linking.
+proton-viewer -m time/us,count \
+  -i '.*(cudagraph_replay|captured_at|cudagraph_capture).*' \
+  -d 8 profile.hatchet
+
+# Attribute linked kernels to model layers or compiled layer regions.
+proton-viewer -m time/us,count -i '.*model\.layers\..*' -d 8 profile.hatchet
+
+# Inspect startup capture independently from measured runtime.
+proton-viewer -m time/us,count -i '.*cudagraph_capture.*' -d 8 \
+  proton_rank0_cuda_graph_capture.hatchet
+
 # Isolate scopes or kernels by regular expression.
 proton-viewer -m time/ms -i '.*execute_context_[1-9].*' -d 2 profile.hatchet
 proton-viewer -m time/ms -i '.*(AllGather|ReduceScatter|allreduce).*' \
@@ -77,6 +92,10 @@ short-kernel evidence:
 Pass `--format json` when another tool will consume the output. Review the
 classification rules in the script before applying them to unfamiliar kernel
 naming schemes; unmatched kernels remain `other`.
+
+The summarizer excludes `*_cuda_graph_capture.hatchet` sidecars by default so
+startup capture does not distort runtime rank comparisons. Pass
+`--include-hidden` when the capture artifact itself is the object of analysis.
 
 ## Follow the diagnosis workflow
 
