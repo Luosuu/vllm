@@ -66,7 +66,7 @@ proton-viewer -m time/us,count -i '.*cudagraph_capture.*' -d 8 \
   proton_rank0_cuda_graph_capture.hatchet
 
 # Isolate scopes or kernels by regular expression.
-proton-viewer -m time/ms -i '.*execute_context_[1-9].*' -d 2 profile.hatchet
+proton-viewer -m time/ms -i '.*execute_[0-9]+_context_[1-9].*' -d 2 profile.hatchet
 proton-viewer -m time/ms -i '.*(AllGather|ReduceScatter|allreduce).*' \
   -d 6 profile.hatchet
 
@@ -93,9 +93,11 @@ Pass `--format json` when another tool will consume the output. Review the
 classification rules in the script before applying them to unfamiliar kernel
 naming schemes; unmatched kernels remain `other`.
 
-The summarizer excludes `*_cuda_graph_capture.hatchet` sidecars by default so
-startup capture does not distort runtime rank comparisons. Pass
-`--include-hidden` when the capture artifact itself is the object of analysis.
+The summarizer excludes `*_cuda_graph_capture.hatchet` sidecars by default and
+restricts context-linked runtime profiles to `execute_*` subtrees. Thus startup
+capture does not distort runtime GPU time, CPU execute time, kernel categories,
+or rank comparisons. Pass `--include-hidden` when the capture artifact itself
+is the object of analysis.
 
 ## Follow the diagnosis workflow
 

@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-
-import regex as re
 
 CATEGORY_PATTERNS = (
     (
@@ -44,7 +43,7 @@ CATEGORY_PATTERNS = (
         re.compile(r"rms_norm|rmsnorm|layer_norm", re.IGNORECASE),
     ),
 )
-SCOPE_PATTERN = re.compile(r"execute_context_(\d+)\((\d+)\)_generation_(\d+)\((\d+)\)")
+SCOPE_PATTERN = re.compile(r"execute_(?:\d+_)?context_(\d+)\(.*\)_generation_\d+\(.*\)")
 
 
 @dataclass
@@ -53,6 +52,7 @@ class ProfileSummary:
 
     profile: str
     total_gpu_ms: float
+    total_cpu_ms: float
     kernel_count: int
     categories_ms: dict[str, float]
     categories_pct: dict[str, float]
@@ -145,42 +145,57 @@ def category(name: str) -> str:
     return "other"
 
 
-def root_metric(root: dict[str, Any], name: str) -> float:
-    return float(root.get("metrics", {}).get(name, 0))
+def scope_metric(scopes: Iterable[dict[str, Any]], name: str) -> float:
+    return sum(float(scope.get("metrics", {}).get(name, 0)) for scope in scopes)
 
 
 def summarize_profile(viewer: str, profile: Path) -> ProfileSummary:
     document = json.loads(profile.read_text())
     root = document[0] if isinstance(document, list) else document
-    total_gpu_ms = viewer_root_time_ms(viewer, profile)
-    total_ns = total_gpu_ms * 1_000_000
+    execution_scopes = []
+    for child in root.get("children", ()):
+        name = str(child.get("frame", {}).get("name", ""))
+        if SCOPE_PATTERN.fullmatch(name):
+            execution_scopes.append(child)
+
+    # A context-linked runtime profile also retains startup capture nodes at
+    # ROOT. Restrict runtime summaries to execute scopes so capture does not
+    # inflate GPU time, kernel counts, or category shares. Capture-only
+    # sidecars intentionally fall back to their complete tree.
+    analysis_roots = execution_scopes or [root]
+    if execution_scopes:
+        total_ns = sum(subtree_time_ns(scope) for scope in execution_scopes)
+    else:
+        total_ns = int(viewer_root_time_ms(viewer, profile) * 1_000_000)
+    total_gpu_ms = total_ns / 1_000_000
+    total_cpu_ns = scope_metric(execution_scopes, "cpu_time (ns)")
     categories_ns = {label: 0 for label, _ in CATEGORY_PATTERNS}
     categories_ns["other"] = 0
     kernel_count = 0
     short_count = {10: 0, 20: 0, 50: 0}
     short_time = {10: 0, 20: 0, 50: 0}
 
-    for node in leaf_nodes(root):
-        metrics = node.get("metrics", {})
-        time_ns = int(metrics.get("time (ns)", 0))
-        count = int(metrics.get("count", 0))
-        name = str(node.get("frame", {}).get("name", ""))
-        categories_ns[category(name)] += time_ns
-        kernel_count += count
-        if count:
-            average_us = time_ns / count / 1_000
-            for threshold in short_count:
-                if average_us < threshold:
-                    short_count[threshold] += count
-                    short_time[threshold] += time_ns
+    for analysis_root in analysis_roots:
+        for node in leaf_nodes(analysis_root):
+            metrics = node.get("metrics", {})
+            time_ns = int(metrics.get("time (ns)", 0))
+            count = int(metrics.get("count", 0))
+            name = str(node.get("frame", {}).get("name", ""))
+            categories_ns[category(name)] += time_ns
+            kernel_count += count
+            if count:
+                average_us = time_ns / count / 1_000
+                for threshold in short_count:
+                    if average_us < threshold:
+                        short_count[threshold] += count
+                        short_time[threshold] += time_ns
 
     mixed_context_ns = 0
     pure_decode_ns = 0
-    for child in root.get("children", ()):
+    for child in execution_scopes:
         name = str(child.get("frame", {}).get("name", ""))
         match = SCOPE_PATTERN.fullmatch(name)
-        if not match:
-            continue
+        assert match is not None
         scope_time_ns = subtree_time_ns(child)
         if int(match.group(1)):
             mixed_context_ns += scope_time_ns
@@ -203,6 +218,7 @@ def summarize_profile(viewer: str, profile: Path) -> ProfileSummary:
     return ProfileSummary(
         profile=str(profile),
         total_gpu_ms=total_gpu_ms,
+        total_cpu_ms=total_cpu_ns / 1_000_000,
         kernel_count=kernel_count,
         categories_ms=categories_ms,
         categories_pct=categories_pct,
@@ -212,10 +228,10 @@ def summarize_profile(viewer: str, profile: Path) -> ProfileSummary:
         mixed_context_pct=100 * mixed_context_ns / total_ns if total_ns else 0,
         pure_decode_ms=pure_decode_ns / 1_000_000,
         pure_decode_pct=100 * pure_decode_ns / total_ns if total_ns else 0,
-        context_requests=root_metric(root, "num_context_requests"),
-        context_tokens=root_metric(root, "num_context_tokens"),
-        generation_requests=root_metric(root, "num_generation_requests"),
-        generation_tokens=root_metric(root, "num_generation_tokens"),
+        context_requests=scope_metric(execution_scopes, "num_context_requests"),
+        context_tokens=scope_metric(execution_scopes, "num_context_tokens"),
+        generation_requests=scope_metric(execution_scopes, "num_generation_requests"),
+        generation_tokens=scope_metric(execution_scopes, "num_generation_tokens"),
     )
 
 
@@ -228,13 +244,17 @@ def render_markdown(summaries: list[ProfileSummary]) -> str:
     lines = [
         "# Proton profile summary",
         "",
-        "| Profile | GPU ms | Kernels | Mixed context % | Pure decode % |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        (
+            "| Profile | GPU ms | CPU execute ms | Kernels | "
+            "Mixed context % | Pure decode % |"
+        ),
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summaries:
         lines.append(
             f"| {Path(item.profile).name} | {item.total_gpu_ms:.1f} | "
-            f"{item.kernel_count} | {item.mixed_context_pct:.2f} | "
+            f"{item.total_cpu_ms:.1f} | {item.kernel_count} | "
+            f"{item.mixed_context_pct:.2f} | "
             f"{item.pure_decode_pct:.2f} |"
         )
     times = [item.total_gpu_ms for item in summaries]
