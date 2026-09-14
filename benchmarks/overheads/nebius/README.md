@@ -14,6 +14,13 @@ missing profiling tools and clones the selected source revisions:
 image="docker.io/vllm/vllm-openai:nightly"
 ```
 
+Startup package installation commands get up to five attempts, with backoff
+delays of 15, 30, 60, and 60 seconds, in addition to package-manager retries.
+This covers APT, bootstrap Python dependencies, vLLM, and the matching
+FlashInfer cubin/JIT-cache packages. Exhausted retries preserve the failing
+exit code; signal-related exits stop immediately. Benchmark runs are not
+retried by this installation policy.
+
 For reproducible runs, resolve the tag once and submit its immutable digest.
 The runtime defaults to `cuda-nsight-systems-13-0`; set
 `NSIGHT_SYSTEMS_PACKAGE` when using a base image with another CUDA release.

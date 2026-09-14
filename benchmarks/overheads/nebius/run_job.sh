@@ -22,16 +22,39 @@ EXPECTED_GPUS=${VLLM_EXPECTED_GPUS:-8}
 JOB_ID_MARKER=${VLLM_JOB_ID_MARKER:-}
 SYNC_PID=
 
+retry_install() {
+  local label=$1
+  shift
+  local attempt exit_code delay=15
+  for attempt in {1..5}; do
+    if "$@"; then
+      return 0
+    else
+      exit_code=$?
+    fi
+    if ((exit_code >= 128 || attempt == 5)); then
+      printf '%s failed (attempt %s/5, exit %s)\n' \
+        "$label" "$attempt" "$exit_code" >&2
+      return "$exit_code"
+    fi
+    printf '%s failed (attempt %s/5, exit %s); retrying in %ss\n' \
+      "$label" "$attempt" "$exit_code" "$delay" >&2
+    sleep "$delay"
+    delay=$((delay < 60 ? delay * 2 : 60))
+  done
+}
+
 install_bootstrap_dependencies() {
   local packages=()
   command -v git >/dev/null || packages+=(git)
   command -v nsys >/dev/null || packages+=("$NSIGHT_SYSTEMS_PACKAGE")
   if ((${#packages[@]})); then
-    apt-get update
-    apt-get install -y --no-install-recommends "${packages[@]}"
+    retry_install 'APT metadata' apt-get update
+    retry_install 'APT packages' \
+      apt-get install -y --no-install-recommends "${packages[@]}"
     rm -rf /var/lib/apt/lists/*
   fi
-  uv pip install --system \
+  retry_install 'Bootstrap Python dependencies' uv pip install --system \
     huggingface_hub llnl-hatchet matplotlib ninja pandas regex
 }
 
@@ -210,7 +233,8 @@ if [[ -n $(git -C "$SOURCE_DIR" diff --name-only "$merge_base" HEAD -- \
 fi
 
 VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base \
-  uv pip install --system --editable "$SOURCE_DIR" --torch-backend=auto
+  retry_install 'vLLM and dependencies' \
+    uv pip install --system --editable "$SOURCE_DIR" --torch-backend=auto
 
 # The base image can contain newer FlashInfer binary packages than the revision
 # under test. uv resolves flashinfer-python from the checkout but may leave the
@@ -222,13 +246,13 @@ flashinfer_cubin_version=$(sed -n 's/^flashinfer-cubin==//p' \
   echo "flashinfer-cubin is not pinned in requirements/cuda.txt" >&2
   exit 1
 }
-uv pip install --system \
+retry_install 'FlashInfer cubin' uv pip install --system \
   --extra-index-url https://flashinfer.ai/whl/ \
   "flashinfer-cubin==$flashinfer_cubin_version"
 flashinfer_cuda_suffix=$(
   "$PYTHON" -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))'
 )
-uv pip install --system \
+retry_install 'FlashInfer JIT cache' uv pip install --system \
   --extra-index-url "https://flashinfer.ai/whl/$flashinfer_cuda_suffix/" \
   "flashinfer-jit-cache==$flashinfer_cubin_version+$flashinfer_cuda_suffix"
 
